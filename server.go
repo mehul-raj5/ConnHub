@@ -50,18 +50,18 @@ func addConn(conn net.Conn, name string) {
 	fmt.Println("Connection established with client :", name)
 }
 
-func removeConn(conn net.Conn) {
+func removeConn(conn net.Conn, name string) {
 	ConnMutex.Lock()
 	delete(connections, conn)
 	ConnMutex.Unlock()
 
-	fmt.Println("Connection demolished with client :", connections[conn])
+	fmt.Println("Connection demolished with client :", name)
 }
 
 func HandleConnection(conn net.Conn, name string) {
 
 	addConn(conn, name)
-	defer removeConn(conn)
+	defer removeConn(conn, name)
 	defer conn.Close()
 
 	buff := make([]byte, 1024)
@@ -69,7 +69,6 @@ func HandleConnection(conn net.Conn, name string) {
 	for {
 		n, err := conn.Read(buff)
 		if err != nil {
-			fmt.Println("Could not read the message", err)
 			break
 		}
 		fmt.Println("Recieved message from : ", name)

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -27,16 +28,22 @@ func WriteMsg(conn net.Conn) {
 
 }
 
-func ReadMsg(conn net.Conn) {
+func ReadMsg(conn net.Conn, file *os.File) {
 	buff := make([]byte, 1024)
+	defer conn.Close()
 	for {
 		n, err := conn.Read(buff)
 		if err != nil {
-			log.Fatalln("Error while recieving data", err)
+			if err == io.EOF {
+				fmt.Println("🔴 Connection closed")
+				return
+			}
+			log.Println("Read error:", err)
+			return
 		}
+		fmt.Fprintln(file, string(buff[:n]))
 		fmt.Println(string(buff[:n]))
 	}
-	defer conn.Close()
 }
 
 func main() {
@@ -61,8 +68,20 @@ func main() {
 		return
 	}
 
+	//create log file
+	file, err := os.OpenFile("example.txt",
+		os.O_APPEND|os.O_CREATE|os.O_RDWR,
+		0644,
+	)
+	if err != nil {
+		panic(err)
+	}
+	defer file.Close()
+
+	fmt.Fprintln(file, "This line is appended")
+
 	go WriteMsg(conn)
-	go ReadMsg(conn)
+	go ReadMsg(conn, file)
 
 	select {}
 
