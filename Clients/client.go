@@ -1,88 +1,48 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"os"
 )
 
-func WriteMsg(conn net.Conn) {
-	reader := bufio.NewReader(os.Stdin)
-	for {
-		Input, _, err := reader.ReadLine()
-		if err != nil {
-			fmt.Println(err)
-			continue
-		}
+//to add groups
+//create 2 lists
+//one in which only member group is stored/
+// one in which you are the owner(done at every client)
+//create a grup using permanent names
+//add this group and members list to edit access groups and members group
 
-		_, err = conn.Write([]byte(Input))
-		if err != nil {
-			log.Fatalln("The message could not be delivered", err)
-			break
-		}
-	}
-	defer conn.Close()
+//to send message using group name fetch the member list and send message to those members using (list, message)(sent to the server and server forwards these messages)
 
-}
-
-func ReadMsg(conn net.Conn, file *os.File) {
-	buff := make([]byte, 1024)
-	defer conn.Close()
-	for {
-		n, err := conn.Read(buff)
-		if err != nil {
-			if err == io.EOF {
-				fmt.Println("🔴 Connection closed")
-				return
-			}
-			log.Println("Read error:", err)
-			return
-		}
-		fmt.Fprintln(file, string(buff[:n]))
-		fmt.Println(string(buff[:n]))
-	}
-}
+//add timestamp+name+random_id to each recieved image
+//think about header in a better format
+//only add from to the message at the reciever side
+//no access given to the server to view the messages
 
 func main() {
-	fmt.Println("------------------------------------------------------------------------------------------------")
-	var serverAddr string
-	var userName string
-	fmt.Print("Enter user name :")
+	var serverAddr, userName string
+	fmt.Print("Enter user name: ")
 	fmt.Scan(&userName)
-	fmt.Print("Enter server address :")
+	fmt.Print("Enter server address")
 	fmt.Scan(&serverAddr)
-	fmt.Println("------------------------------------------------------------------------------------------------")
 
 	conn, err := net.Dial("tcp", serverAddr)
 	if err != nil {
-		log.Fatalln("Connection Error", err)
+		log.Fatalln("Connection error:", err)
 	}
+	defer conn.Close()
 
-	_, err1 := conn.Write([]byte(userName))
-	if err1 != nil {
-		log.Printf("Error while rendering username : %v", err)
-		conn.Close()
-		return
-	}
+	//convert name into same header and payload format for easy understanding
+	nameBytes := []byte(userName)
+	lenHeader, _ := IntTo3Bytes(len(nameBytes))
+	conn.Write(lenHeader)
+	conn.Write(nameBytes)
 
-	//create log file
-	file, err := os.OpenFile("example.txt",
-		os.O_APPEND|os.O_CREATE|os.O_RDWR,
-		0644,
-	)
-	if err != nil {
-		panic(err)
-	}
-	defer file.Close()
+	f, _ := os.OpenFile("messages.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	defer f.Close()
 
-	fmt.Fprintln(file, "This line is appended")
-
-	go WriteMsg(conn)
-	go ReadMsg(conn, file)
-
-	select {}
-
+	go WriteMsg(conn, userName)
+	ReadMsg(conn, f) // Run in main thread to keep app alive
 }
