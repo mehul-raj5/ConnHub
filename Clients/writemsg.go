@@ -15,7 +15,7 @@ func WriteMsg(conn net.Conn, userName string) {
 	nameLenBytes, _ := IntTo3Bytes(len(nameBytes))
 
 	for {
-		fmt.Print("Enter type (1=text, 2=image): ")
+		fmt.Print("Enter type (1 = text, 2 = file): ")
 		line, _, _ := reader.ReadLine()
 		TypeOfMsg := string(line)
 
@@ -34,7 +34,7 @@ func WriteMsg(conn net.Conn, userName string) {
 			fmt.Print("Enter image filename: ")
 			filename, _, _ := reader.ReadLine()
 
-			path := "/Users/mehulraj/Desktop/PROJECTS /MSR(GO)/data" + string(filename)
+			path := "/Users/mehulraj/Desktop/PROJECTS /MSR(GO)/data/" + string(filename)
 
 			file, err := os.ReadFile(path)
 

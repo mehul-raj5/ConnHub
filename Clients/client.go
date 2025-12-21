@@ -25,7 +25,7 @@ func main() {
 	var serverAddr, userName string
 	fmt.Print("Enter user name: ")
 	fmt.Scan(&userName)
-	fmt.Print("Enter server address")
+	fmt.Print("Enter server address: ")
 	fmt.Scan(&serverAddr)
 
 	conn, err := net.Dial("tcp", serverAddr)

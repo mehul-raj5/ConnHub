@@ -60,7 +60,7 @@ func ReadMsg(conn net.Conn, file *os.File) {
 		if msgType == 1 {
 			// text
 			finalMsg := fmt.Sprintf("From %s: %s", sender, string(payload))
-			fmt.Println(finalMsg) // Print to console so you see it live
+			// fmt.Println(finalMsg) // Print to console so you see it live
 			fmt.Fprintln(file, finalMsg)
 
 		} else if msgType == 2 {
@@ -77,6 +77,7 @@ func ReadMsg(conn net.Conn, file *os.File) {
 				continue
 			}
 			fmt.Printf("Successfully saved %s from %s as %s\n", kind, sender, path)
+			fmt.Fprintf(file, "Successfully saved %s from %s as %s\n", kind, sender, path)
 		}
 	}
 }
