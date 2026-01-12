@@ -2,65 +2,257 @@ package main
 
 import (
 	"bufio"
+	"encoding/binary"
 	"fmt"
-	"log"
 	"net"
 	"os"
+	"strings"
 )
 
-func WriteMsg(conn net.Conn, userName string) {
+const (
+	TypeCreational uint8 = 1
+	TypeMessaging  uint8 = 2
+)
 
-	reader := bufio.NewReader(os.Stdin)
-	nameBytes := []byte(userName)
-	nameLenBytes, _ := IntTo3Bytes(len(nameBytes))
+const (
+	ActionAuth         uint8 = 0
+	ActionCreateGroup  uint8 = 1
+	ActionUpdateGroup  uint8 = 2
+	ActionBroadcastMsg uint8 = 3
+	ActionSendGroupMsg uint8 = 4
+)
 
+const (
+	MaxGroupNameLen = 64
+	MaxUsers        = 50
+	MaxMessageLen   = 4096
+	MaxBodyLen      = 8192
+)
+
+const (
+	UpdateAddUsers    uint8 = 1
+	UpdateRemoveUsers uint8 = 2
+)
+
+type Packet struct {
+	Type   uint8
+	Action uint8
+	Flags  uint8
+	Body   []byte
+}
+
+var reader = bufio.NewReader(os.Stdin)
+
+func readLine(prompt string, maxLen int) (string, error) {
+	fmt.Print(prompt)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	line = strings.TrimSpace(line)
+
+	if len(line) == 0 || len(line) > maxLen {
+		return "", fmt.Errorf("invalid input length")
+	}
+	return line, nil
+}
+
+func readInt(prompt string) (int, error) {
+	fmt.Print(prompt)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return 0, err
+	}
+	line = strings.TrimSpace(line)
+
+	var v int
+	_, err = fmt.Sscanf(line, "%d", &v)
+	return v, err
+}
+
+func buildBroadcastMessageBody() ([]byte, error) {
+	message, err := readLine("Enter message: ", MaxMessageLen)
+	if err != nil {
+		return nil, err
+	}
+
+	buf := make([]byte, 2)
+	binary.BigEndian.PutUint16(buf, uint16(len(message)))
+	buf = append(buf, []byte(message)...)
+	return buf, nil
+}
+
+func buildCreateGroupBody() ([]byte, error) {
+	groupName, err := readLine("Enter group name: ", MaxGroupNameLen)
+	if err != nil {
+		return nil, err
+	}
+
+	userCount, err := readInt("Enter number of users to add: ")
+	if err != nil || userCount <= 0 || userCount > MaxUsers {
+		return nil, fmt.Errorf("invalid user count")
+	}
+
+	buf := make([]byte, 0)
+	buf = append(buf, byte(len(groupName)))
+	buf = append(buf, []byte(groupName)...)
+	buf = append(buf, byte(userCount))
+
+	for i := 0; i < userCount; i++ {
+		username, err := readLine(
+			fmt.Sprintf("Enter username %d: ", i+1),
+			FixedUsernameSize,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		nameBytes := make([]byte, FixedUsernameSize)
+		copy(nameBytes, username)
+		buf = append(buf, nameBytes...)
+	}
+
+	return buf, nil
+}
+
+func buildUpdateGroupBody() ([]byte, error) {
+	groupName, err := readLine("Enter group name: ", MaxGroupNameLen)
+	if err != nil {
+		return nil, err
+	}
+
+	fmt.Println("1 = Add users")
+	fmt.Println("2 = Remove users")
+
+	op, err := readInt("Choose operation: ")
+	if err != nil || (op != int(UpdateAddUsers) && op != int(UpdateRemoveUsers)) {
+		return nil, fmt.Errorf("invalid operation")
+	}
+
+	userCount, err := readInt("Enter number of users: ")
+	if err != nil || userCount <= 0 || userCount > MaxUsers {
+		return nil, fmt.Errorf("invalid user count")
+	}
+
+	buf := make([]byte, 0)
+	buf = append(buf, byte(len(groupName)))
+	buf = append(buf, []byte(groupName)...)
+	buf = append(buf, byte(op))
+	buf = append(buf, byte(userCount))
+
+	for i := 0; i < userCount; i++ {
+		username, err := readLine(
+			fmt.Sprintf("Enter username %d: ", i+1),
+			FixedUsernameSize,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		nameBytes := make([]byte, FixedUsernameSize)
+		copy(nameBytes, username)
+		buf = append(buf, nameBytes...)
+	}
+
+	return buf, nil
+}
+
+func buildSendGroupMessageBody() ([]byte, error) {
+	groupName, err := readLine("Enter group name: ", MaxGroupNameLen)
+	if err != nil {
+		return nil, err
+	}
+
+	message, err := readLine("Enter message: ", MaxMessageLen)
+	if err != nil {
+		return nil, err
+	}
+
+	buf := make([]byte, 0)
+	buf = append(buf, byte(len(groupName)))
+	buf = append(buf, []byte(groupName)...)
+
+	msgLen := make([]byte, 2)
+	binary.BigEndian.PutUint16(msgLen, uint16(len(message)))
+	buf = append(buf, msgLen...)
+	buf = append(buf, []byte(message)...)
+
+	return buf, nil
+}
+
+func encode(p Packet) ([]byte, error) {
+	if len(p.Body) > MaxBodyLen {
+		return nil, fmt.Errorf("body too large")
+	}
+
+	buf := make([]byte, 7)
+	buf[0] = p.Type
+	buf[1] = p.Action
+	buf[2] = p.Flags
+	binary.BigEndian.PutUint32(buf[3:], uint32(len(p.Body)))
+	buf = append(buf, p.Body...)
+
+	return buf, nil
+}
+
+func WriteMsg(conn net.Conn) {
 	for {
-		fmt.Print("Enter type (1 = text, 2 = file): ")
-		line, _, _ := reader.ReadLine()
-		TypeOfMsg := string(line)
+		var p Packet
+		p.Flags = 0
 
-		var data []byte
+		t, err := readInt("Type (1=Creational, 2=Messaging): ")
+		if err != nil {
+			fmt.Println(err)
+			continue
+		}
+		p.Type = uint8(t)
 
-		if TypeOfMsg == "1" {
-			fmt.Print("Enter message: ")
-			msg, _, _ := reader.ReadLine()
+		switch p.Type {
+		case TypeCreational:
+			a, _ := readInt("Action (1=Create, 2=Update): ")
+			p.Action = uint8(a)
 
-			lenBytes, _ := IntTo3Bytes(len(msg))
-			data = append(data, byte(1))     // Type
-			data = append(data, lenBytes...) // length of payload
-			data = append(data, msg...)      // payload
-
-		} else if TypeOfMsg == "2" {
-			fmt.Print("Enter image filename: ")
-			filename, _, _ := reader.ReadLine()
-
-			path := "/Users/mehulraj/Desktop/PROJECTS /MSR(GO)/data/" + string(filename)
-
-			file, err := os.ReadFile(path)
-
-			if err != nil {
-
-				fmt.Println("file not found")
-
+			if p.Action == ActionCreateGroup {
+				p.Body, err = buildCreateGroupBody()
+			} else if p.Action == ActionUpdateGroup {
+				p.Body, err = buildUpdateGroupBody()
+			} else {
+				fmt.Println("Invalid action")
 				continue
-
 			}
 
-			lenBytes, _ := IntTo3Bytes(len(file))
-			data = append(data, byte(2))     // Type
-			data = append(data, lenBytes...) // length of payload
-			data = append(data, file...)     // payload
-		} else {
+		case TypeMessaging:
+			a, _ := readInt("Action (3=Broadcast, 4=Group Msg): ")
+			p.Action = uint8(a)
+
+			if p.Action == ActionBroadcastMsg {
+				p.Body, err = buildBroadcastMessageBody()
+			} else if p.Action == ActionSendGroupMsg {
+				p.Body, err = buildSendGroupMessageBody()
+			} else {
+				fmt.Println("Invalid action")
+				continue
+			}
+
+		default:
 			fmt.Println("Invalid type")
 			continue
 		}
 
-		data = append(data, nameLenBytes...)
-		data = append(data, nameBytes...)
-
-		_, err := conn.Write(data)
 		if err != nil {
-			log.Println("Write error:", err)
+			fmt.Println("Error:", err)
+			continue
+		}
+
+		data, err := encode(p)
+		if err != nil {
+			fmt.Println("Encode error:", err)
+			continue
+		}
+
+		_, err = conn.Write(data)
+		if err != nil {
+			fmt.Println("Write error:", err)
 			return
 		}
 	}

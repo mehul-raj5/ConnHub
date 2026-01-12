@@ -4,27 +4,51 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"os"
+	// "tli impport karni hai"
 )
 
-//to add groups
-//create 2 lists
-//one in which only member group is stored/
-// one in which you are the owner(done at every client)
-//create a grup using permanent names
-//add this group and members list to edit access groups and members group
+func buildAuthBody() ([]byte, error) {
+	userName, err := readLine("Enter your username: ", 32)
+	if err != nil {
+		return nil, err
+	}
 
-//to send message using group name fetch the member list and send message to those members using (list, message)(sent to the server and server forwards these messages)
+	buf := make([]byte, 0, 1+len(userName))
+	buf = append(buf, byte(len(userName)))
+	buf = append(buf, []byte(userName)...)
 
-//add timestamp+name+random_id to each recieved image
-//think about header in a better format
-//only add from to the message at the reciever side
-//no access given to the server to view the messages
+	return buf, nil
+}
+
+func sendAuthPacket(conn net.Conn) error {
+	body, err := buildAuthBody()
+	if err != nil {
+		return err
+	}
+
+	p := Packet{
+		Type:   TypeCreational,
+		Action: ActionAuth,
+		Flags:  0,
+		Body:   body,
+	}
+
+	buf, err := encode(p)
+	if err != nil {
+		return err
+	}
+
+	_, err = conn.Write(buf)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("Authenticated successfully")
+	return nil
+}
 
 func main() {
-	var serverAddr, userName string
-	fmt.Print("Enter user name: ")
-	fmt.Scan(&userName)
+	var serverAddr string
 	fmt.Print("Enter server address: ")
 	fmt.Scan(&serverAddr)
 
@@ -34,15 +58,26 @@ func main() {
 	}
 	defer conn.Close()
 
-	//convert name into same header and payload format for easy understanding
-	nameBytes := []byte(userName)
-	lenHeader, _ := IntTo3Bytes(len(nameBytes))
-	conn.Write(lenHeader)
-	conn.Write(nameBytes)
+	err = sendAuthPacket(conn)
+	if err != nil {
+		log.Fatalln("Authentication error:", err)
+	}
 
-	f, _ := os.OpenFile("messages.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	defer f.Close()
-
-	go WriteMsg(conn, userName)
-	ReadMsg(conn, f) // Run in main thread to keep app alive
+	go WriteMsg(conn)
+	readmsg(conn)
 }
+
+// byte1 (creational or just sending and updating message)|
+// byte2 if creational (create user or create group), if sending message (updating group users or sending message to broadcast, if to group or private -> access payload)
+
+//part 3 if create user -> username, if create group -> group name
+//part 4 list of users or payload
+
+//update ke liye body me changes aayenge
+//flags for future use just like tcp header hehe
+
+//send message -> broadcast or to a specific group
+
+//create group -> enter group name and members
+//view groups -> view groups in which you are a member or owner DONT DO THIS , JUST FOR REFERENCE
+//exit

@@ -7,6 +7,7 @@ import (
 	"strings"
 )
 
+// will use in future
 func getFileDetails(data []byte) (kind, extension string) {
 
 	fullMime := http.DetectContentType(data)
