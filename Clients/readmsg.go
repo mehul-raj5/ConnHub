@@ -5,8 +5,13 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"net"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 )
 
 const FixedUsernameSize = 32
@@ -30,7 +35,7 @@ func decode(conn net.Conn) (Packet, error) {
 	p.Flags = header[2]
 	bodyLen := int(binary.BigEndian.Uint32(header[3:]))
 
-	if bodyLen < 0 || bodyLen > 8192 {
+	if bodyLen < 0 || bodyLen > MaxBodyLen {
 		return p, fmt.Errorf("invalid body length")
 	}
 
@@ -154,6 +159,26 @@ func handleUpdateGroup(p Packet) {
 	fmt.Printf("%s updated group %s\n", CreatorName, groupName)
 }
 
+const saveDir = "data_received"
+
+// saveReceivedFile saves payload to saveDir (creating it if needed) with a unique name
+// using getFileDetails. Returns the saved file path and any error.
+func saveReceivedFile(payload []byte, sender, dir string) (path string, err error) {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", err
+	}
+	kind, ext := getFileDetails(payload)
+	timestamp := time.Now().Format("2006-01-02_15-04-05")
+	safeSender := strings.ReplaceAll(sender, "@", "_")
+	safeSender = strings.ReplaceAll(safeSender, " ", "_")
+	filename := fmt.Sprintf("file_%s_%s_%s%s", safeSender, timestamp, kind, ext)
+	path = filepath.Join(dir, filename)
+	if err := os.WriteFile(path, payload, 0644); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
 func handleBroadcast(p Packet) {
 	if len(p.Body) < 1 {
 		return
@@ -164,18 +189,28 @@ func handleBroadcast(p Packet) {
 		return
 	}
 
-	if len(p.Body) < 1+CreatorLen+2 {
+	if len(p.Body) < 1+CreatorLen+1+4 {
 		return
 	}
 	CreatorName := string(p.Body[1 : 1+CreatorLen])
+	messagetype := p.Body[1+CreatorLen]
 
-	msgLen := int(binary.BigEndian.Uint16(p.Body[1+CreatorLen : 1+CreatorLen+2]))
-	if len(p.Body) < 1+CreatorLen+2+msgLen {
+	msgLen := int(binary.BigEndian.Uint32(p.Body[1+CreatorLen+1 : 1+CreatorLen+1+4]))
+	if len(p.Body) < 1+CreatorLen+1+4+msgLen {
 		return
 	}
-	message := string(p.Body[1+CreatorLen+2 : 1+CreatorLen+2+msgLen])
+	message := p.Body[1+CreatorLen+1+4 : 1+CreatorLen+1+4+msgLen]
 
-	fmt.Printf("Broadcast from %s: %s\n", CreatorName, message)
+	if messagetype == 1 {
+		fmt.Printf("Broadcast from %s: %s\n", CreatorName, string(message))
+	} else if messagetype == 2 {
+		path, err := saveReceivedFile(message, CreatorName, saveDir)
+		if err != nil {
+			log.Println("Error saving file:", err)
+			return
+		}
+		fmt.Printf("Broadcast message from %s, saved as %s\n", CreatorName, path)
+	}
 }
 
 func handleSendGroupMessage(p Packet) {
@@ -189,18 +224,59 @@ func handleSendGroupMessage(p Packet) {
 	creator := string(p.Body[1 : 1+creatorLen])
 
 	groupNameLen := int(p.Body[1+creatorLen])
-	if len(p.Body) < 1+creatorLen+1+groupNameLen+2 {
+	if len(p.Body) < 1+creatorLen+1+groupNameLen+1+4 {
 		return
 	}
 	groupName := string(p.Body[1+creatorLen+1 : 1+creatorLen+1+groupNameLen])
+	messagetype := p.Body[1+creatorLen+1+groupNameLen]
 
-	msgLen := int(binary.BigEndian.Uint16(p.Body[1+creatorLen+1+groupNameLen : 1+creatorLen+1+groupNameLen+2]))
-	if len(p.Body) < 1+creatorLen+1+groupNameLen+2+msgLen {
+	msgLen := int(binary.BigEndian.Uint32(p.Body[1+creatorLen+1+groupNameLen+1 : 1+creatorLen+1+groupNameLen+1+4]))
+	if len(p.Body) < 1+creatorLen+1+groupNameLen+1+4+msgLen {
 		return
 	}
-	message := string(p.Body[1+creatorLen+1+groupNameLen+2 : 1+creatorLen+1+groupNameLen+2+msgLen])
+	message := p.Body[1+creatorLen+1+groupNameLen+1+4 : 1+creatorLen+1+groupNameLen+1+4+msgLen]
 
-	fmt.Printf("%s : %s sent %s\n", groupName, creator, message)
+	if messagetype == 1 {
+		fmt.Printf("%s : %s sent %s\n", groupName, creator, string(message))
+	} else if messagetype == 2 {
+		path, err := saveReceivedFile(message, creator, saveDir)
+		if err != nil {
+			log.Println("Error saving file:", err)
+			return
+		}
+		fmt.Printf("Group message from %s, saved as %s\n", creator, path)
+	}
+}
+
+func handlePrivateMessage(p Packet) {
+	if len(p.Body) < 1 {
+		return
+	}
+	senderLen := int(p.Body[0])
+	if senderLen > FixedUsernameSize {
+		return
+	}
+	if len(p.Body) < 1+senderLen+1+4 {
+		return
+	}
+	sender := string(p.Body[1 : 1+senderLen])
+	messagetype := p.Body[1+senderLen]
+	msgLen := int(binary.BigEndian.Uint32(p.Body[1+senderLen+1 : 1+senderLen+1+4]))
+	if len(p.Body) < 1+senderLen+1+4+msgLen {
+		return
+	}
+	message := p.Body[1+senderLen+1+4 : 1+senderLen+1+4+msgLen]
+
+	if messagetype == 1 {
+		fmt.Printf("Private from %s: %s\n", sender, string(message))
+	} else if messagetype == 2 {
+		path, err := saveReceivedFile(message, sender, saveDir)
+		if err != nil {
+			log.Println("Error saving file:", err)
+			return
+		}
+		fmt.Printf("Private message from %s, saved as %s\n", sender, path)
+	}
 }
 
 func readmsg(conn net.Conn) {
@@ -229,6 +305,8 @@ func readmsg(conn net.Conn) {
 				handleBroadcast(p)
 			case ActionSendGroupMsg:
 				handleSendGroupMessage(p)
+			case ActionPrivateMsg:
+				handlePrivateMessage(p)
 			default:
 				fmt.Println("Invalid Messaging Action")
 			}

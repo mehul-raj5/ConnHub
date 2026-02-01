@@ -4,11 +4,10 @@ import (
 	"fmt"
 	"log"
 	"net"
-	// "tli impport karni hai"
 )
 
 func buildAuthBody() ([]byte, error) {
-	userName, err := readLine("Enter your username: ", 32)
+	userName, err := readLine("Enter your username: ", FixedUsernameSize)
 	if err != nil {
 		return nil, err
 	}

@@ -20,13 +20,15 @@ const (
 	ActionUpdateGroup  uint8 = 2
 	ActionBroadcastMsg uint8 = 3
 	ActionSendGroupMsg uint8 = 4
+	ActionPrivateMsg   uint8 = 5
 )
 
 const (
 	MaxGroupNameLen = 64
 	MaxUsers        = 50
 	MaxMessageLen   = 4096
-	MaxBodyLen      = 8192
+	MaxBodyLen      = 1024 * 1024 * 100
+	MaxFileSize     = 1024 * 1024 * 100 // 100MB
 )
 
 const (
@@ -43,20 +45,38 @@ type Packet struct {
 
 var reader = bufio.NewReader(os.Stdin)
 
-func readLine(prompt string, maxLen int) (string, error) {
+func readLine(prompt string, maxLen int) ([]byte, error) {
 	fmt.Print(prompt)
 	line, err := reader.ReadString('\n')
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	line = strings.TrimSpace(line)
 
 	if len(line) == 0 || len(line) > maxLen {
-		return "", fmt.Errorf("invalid input length")
+		return nil, fmt.Errorf("invalid input length")
 	}
-	return line, nil
+	return []byte(line), nil
 }
-
+func readFile(prompt string) ([]byte, error) {
+	fmt.Print(prompt)
+	path, err := reader.ReadString('\n')
+	if err != nil {
+		return nil, err
+	}
+	path = strings.TrimSpace(path)
+	if len(path) == 0 {
+		return nil, fmt.Errorf("invalid file path")
+	}
+	file, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(file) > MaxFileSize {
+		return nil, fmt.Errorf("file too large")
+	}
+	return file, nil
+}
 func readInt(prompt string) (int, error) {
 	fmt.Print(prompt)
 	line, err := reader.ReadString('\n')
@@ -71,14 +91,34 @@ func readInt(prompt string) (int, error) {
 }
 
 func buildBroadcastMessageBody() ([]byte, error) {
-	message, err := readLine("Enter message: ", MaxMessageLen)
-	if err != nil {
-		return nil, err
+	fmt.Println("Enter the type of broadcast message (1 = Text, 2 = File): ")
+	var messagetype int
+	fmt.Scan(&messagetype)
+	if messagetype != 1 && messagetype != 2 {
+		return nil, fmt.Errorf("invalid message type")
+	}
+	var message []byte
+
+	if messagetype == 1 {
+		temp, err := readLine("Enter message: ", MaxMessageLen)
+		if err != nil {
+			return nil, err
+		}
+		message = []byte(temp)
+	} else if messagetype == 2 {
+		temp, err := readFile("Enter file path: ")
+		if err != nil {
+			return nil, err
+		}
+		message = temp
 	}
 
-	buf := make([]byte, 2)
-	binary.BigEndian.PutUint16(buf, uint16(len(message)))
-	buf = append(buf, []byte(message)...)
+	buf := make([]byte, 0)
+	buf = append(buf, byte(messagetype))
+	msgLen := make([]byte, 4)
+	binary.BigEndian.PutUint32(msgLen, uint32(len(message)))
+	buf = append(buf, msgLen...)
+	buf = append(buf, message...)
 	return buf, nil
 }
 
@@ -163,19 +203,78 @@ func buildSendGroupMessageBody() ([]byte, error) {
 		return nil, err
 	}
 
-	message, err := readLine("Enter message: ", MaxMessageLen)
-	if err != nil {
-		return nil, err
+	fmt.Println("Enter the type of message (1 = Text, 2 = File): ")
+	var messagetype int
+	fmt.Scan(&messagetype)
+	if messagetype != 1 && messagetype != 2 {
+		return nil, fmt.Errorf("invalid message type")
+	}
+	var message []byte
+
+	if messagetype == 1 {
+		temp, err := readLine("Enter message: ", MaxMessageLen)
+		if err != nil {
+			return nil, err
+		}
+		message = []byte(temp)
+	} else if messagetype == 2 {
+		temp, err := readFile("Enter file path: ")
+		if err != nil {
+			return nil, err
+		}
+		message = temp
 	}
 
 	buf := make([]byte, 0)
 	buf = append(buf, byte(len(groupName)))
 	buf = append(buf, []byte(groupName)...)
+	buf = append(buf, byte(messagetype))
 
-	msgLen := make([]byte, 2)
-	binary.BigEndian.PutUint16(msgLen, uint16(len(message)))
+	msgLen := make([]byte, 4)
+	binary.BigEndian.PutUint32(msgLen, uint32(len(message)))
 	buf = append(buf, msgLen...)
-	buf = append(buf, []byte(message)...)
+	buf = append(buf, message...)
+
+	return buf, nil
+}
+
+func buildPrivateMessageBody() ([]byte, error) {
+	targetUsername, err := readLine("Enter recipient username: ", FixedUsernameSize)
+	if err != nil {
+		return nil, err
+	}
+
+	fmt.Println("Enter the type of message (1 = Text, 2 = File): ")
+	var messagetype int
+	fmt.Scan(&messagetype)
+	if messagetype != 1 && messagetype != 2 {
+		return nil, fmt.Errorf("invalid message type")
+	}
+	var message []byte
+
+	if messagetype == 1 {
+		temp, err := readLine("Enter message: ", MaxMessageLen)
+		if err != nil {
+			return nil, err
+		}
+		message = []byte(temp)
+	} else if messagetype == 2 {
+		temp, err := readFile("Enter file path: ")
+		if err != nil {
+			return nil, err
+		}
+		message = temp
+	}
+
+	buf := make([]byte, 0)
+	buf = append(buf, byte(len(targetUsername)))
+	buf = append(buf, []byte(targetUsername)...)
+	buf = append(buf, byte(messagetype))
+
+	msgLen := make([]byte, 4)
+	binary.BigEndian.PutUint32(msgLen, uint32(len(message)))
+	buf = append(buf, msgLen...)
+	buf = append(buf, message...)
 
 	return buf, nil
 }
@@ -222,13 +321,15 @@ func WriteMsg(conn net.Conn) {
 			}
 
 		case TypeMessaging:
-			a, _ := readInt("Action (3=Broadcast, 4=Group Msg): ")
+			a, _ := readInt("Action (3=Broadcast, 4=Group Msg, 5=Private Msg): ")
 			p.Action = uint8(a)
 
 			if p.Action == ActionBroadcastMsg {
 				p.Body, err = buildBroadcastMessageBody()
 			} else if p.Action == ActionSendGroupMsg {
 				p.Body, err = buildSendGroupMessageBody()
+			} else if p.Action == ActionPrivateMsg {
+				p.Body, err = buildPrivateMessageBody()
 			} else {
 				fmt.Println("Invalid action")
 				continue
