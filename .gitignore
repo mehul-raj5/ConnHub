@@ -1,3 +1,41 @@
-*.txt
-Clients/data_received/
-data/
+# Ignore everything by default
+/*
+
+# Except these core directories and files
+!/Clients/
+!/Server/
+!/Common/
+!/README.md
+!/.gitignore
+
+# General exclusions
+*.key
+*.log
+*.exe
+*.out
+*.app
+
+# Compiled binaries
+Clients/client
+Clients/Clients
+Server/Server
+Server/server
+bin/
+dist/
+
+# OS generated files
+.DS_Store
+/Clients/downloads/
+/Clients/data_received/
+/data/
+
+# Go workspaces and caches
+.gocache/
+.gomodcache/
+.gotmp/
+local_cache/
+local_tmp/
+dist/
+bin/
+/client
+.DS_Store

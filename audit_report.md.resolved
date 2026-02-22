@@ -1,0 +1,50 @@
+# Deep Scan & Audit Report
+
+## 1. Critical Security Flaws
+
+### A. Group Administration & Key Hijacking
+**Severity: Critical**
+- **Issue**: The current implementation does not securely track who the "Admin" of a group is across all clients.
+  - The [Server](file:///Users/mehulraj/Desktop/PROJECTS%20/hello%20hello/Server/server.go#35-43) does not store [Admin](file:///Users/mehulraj/Desktop/PROJECTS%20/hello%20hello/Clients/manager.go#139-147) status in [Conversation](file:///Users/mehulraj/Desktop/PROJECTS%20/hello%20hello/Server/server.go#28-34) struct.
+  - Clients only track if *they* are the admin (`IsAdmin` bool). They do not track who the admin is if it's not them.
+- **Impact**: Any malicious group member can send a `CtrlGroupKeyUpdate` message. Since recipients don't verify if the sender is the actual admin, they will accept the new key. This allows any member to hijack the encryption session, locking out the real admin and other users.
+- **Location**: 
+  - [Clients/client.go](file:///Users/mehulraj/Desktop/PROJECTS%20/hello%20hello/Clients/client.go): `case common.CtrlGroupKeyUpdate` in [readLoop](file:///Users/mehulraj/Desktop/PROJECTS%20/hello%20hello/Clients/client.go#103-360).
+  - [Clients/manager.go](file:///Users/mehulraj/Desktop/PROJECTS%20/hello%20hello/Clients/manager.go): [ConversationInfo](file:///Users/mehulraj/Desktop/PROJECTS%20/hello%20hello/Clients/manager.go#36-42) only has `IsAdmin` (self), not `AdminID`.
+
+### B. Unverified Group Operations
+**Severity: High**
+- **Issue**: The server processes `CtrlGroupAdd` and `CtrlGroupRemove` messages from *any* user who knows the Group ID (or is a member). It does not verify if the sender has administrative privileges.
+- **Impact**: Any user can add or remove members from a group, bypassing potential restrictions.
+- **Location**: [Server/server.go](file:///Users/mehulraj/Desktop/PROJECTS%20/hello%20hello/Server/server.go) ([handleGroupAdd](file:///Users/mehulraj/Desktop/PROJECTS%20/hello%20hello/Server/server.go#151-226), [handleGroupRemove](file:///Users/mehulraj/Desktop/PROJECTS%20/hello%20hello/Server/server.go#227-283)).
+
+### C. Race Condition in Key Rotation
+**Severity: High**
+- **Issue**: In [rotateGroupKey](file:///Users/mehulraj/Desktop/PROJECTS%20/hello%20hello/Clients/client.go#738-844), if a 1-to-1 session with a member doesn't exist, the client sends `CtrlDirectInit` and immediately sleeps for 50ms before attempting a handshake.
+- **Impact**: If the server or network is slow (taking >50ms), the handshake init will proceed before the server has registered the direct conversation, leading to failure. This makes group creation/updates flaky.
+- **Location**: [Clients/client.go](file:///Users/mehulraj/Desktop/PROJECTS%20/hello%20hello/Clients/client.go) (Line ~795).
+
+## 2. Error Handling & Stability
+
+### A. Aggressive Client Termination
+**Severity: Medium**
+- **Issue**: The client calls `os.Exit(1)` immediately if the connection to the server drops or a decode error occurs.
+- **Impact**: Poor user experience. Transient network glitches cause the app to crash instead of attempting to reconnect.
+- **Location**: [Clients/client.go](file:///Users/mehulraj/Desktop/PROJECTS%20/hello%20hello/Clients/client.go) ([readLoop](file:///Users/mehulraj/Desktop/PROJECTS%20/hello%20hello/Clients/client.go#103-360)).
+
+### B. Silent Server Failures
+**Severity: Low**
+- **Issue**: The server often returns silently if packet bodies are too short, without logging the error or notifying the sender.
+- **Location**: [Server/server.go](file:///Users/mehulraj/Desktop/PROJECTS%20/hello%20hello/Server/server.go) (Multiple `if len(p.Body) < X { return }` checks).
+
+## 3. Protocol & Implementation Notes
+
+- **Sequence Number Leak**: The E2EE implementation sends the Sequence Number in plaintext (`Body[0:4]`) before the encrypted payload. This is necessary for the current Ratchet design but leaks the number of messages sent.
+- **Traffic Analysis**: Metadata (Message Type, Sender, Receiver) is visible to the server, which is standard for this architecture but worth noting for privacy.
+
+## 4. Recommendations
+
+1.  **Server-Side Admin Enforcement**: Update [Server](file:///Users/mehulraj/Desktop/PROJECTS%20/hello%20hello/Server/server.go#35-43) to store the Admin's UserID for each group and reject `CtrlGroupAdd`/[Remove](file:///Users/mehulraj/Desktop/PROJECTS%20/hello%20hello/Server/server.go#227-283) from non-admins.
+2.  **Signed Control Messages**: Group Key Updates should be signed by the Admin's private key, and clients should verify this signature against the known Admin ID.
+3.  **Fix Race Condition**: Implement an acknowledgment mechanism for `CtrlDirectInit` or use a retry loop with exponential backoff instead of a hardcoded sleep.
+4.  **Graceful Reconnection**: Modify [readLoop](file:///Users/mehulraj/Desktop/PROJECTS%20/hello%20hello/Clients/client.go#103-360) to attempt reconnection on failure instead of exiting.

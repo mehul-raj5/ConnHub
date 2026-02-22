@@ -1,0 +1,162 @@
+# Messaging Protocol Specification
+
+This document details the packet formats for all operations in the messaging application.
+
+## 1. Common Header Format
+All packets start with a fixed-size 53-byte header.
+
+| Field | Size (Bytes) | Description |
+| :--- | :--- | :--- |
+| **MessageID** | 16 | Unique ID for the message (UUID) |
+| **ConversationID** | 16 | ID of the conversation (Group or Private) |
+| **SenderID** | 16 | ID of the sender |
+| **MsgType** | 1 | Type of operation (see below) |
+| **BodyLen** | 4 | Length of the variable-size Body (Big Endian uint32) |
+
+**Total Header Size:** 53 Bytes
+
+## 2. Operations
+
+### 2.1 Login / Handshake
+
+#### Client -> Server
+- **MsgType**: `CtrlLogin (0x10)`
+- **Body**: `[Username String]`
+- **Description**: Client sends username to register.
+
+#### Server -> Client
+- **MsgType**: `CtrlLoginAck (0x11)`
+- **Body**: `[UserID 16]`
+- **Description**: Server acknowledges login and assigns a UserID.
+
+---
+
+### 2.2 Create Group
+
+#### Client -> Server
+- **MsgType**: `CtrlGroupCreate (0x12)`
+- **Body Structure**:
+  ```text
+  [NameLen 1][GroupName][MemberCount 1]
+  [Member1Len 1][Member1Name]
+  [Member2Len 1][Member2Name]
+  ...
+  ```
+- **Description**: Request to create a group with initial members.
+
+#### Server -> Client (Broadcast)
+- **MsgType**: `CtrlGroupCreate (0x12)`
+- **Body Structure**:
+  ```text
+  [ConversationID 16]
+  [NameLen 1][GroupName]
+  [MemberCount 1]
+  [UserID 16][NameLen 1][UserName]
+  [UserID 16][NameLen 1][UserName]
+  ...
+  ```
+- **Description**: Sent to all members of the new group. Contains full group details.
+
+---
+
+### 2.3 Add Member to Group
+
+#### Client -> Server
+- **MsgType**: `CtrlGroupAdd (0x13)`
+- **Body Structure**:
+  ```text
+  [ConversationID 16]
+  [UsernameLen 1][Username]
+  ```
+- **Description**: specific user to add to the group.
+
+#### Server -> Client (Broadcast)
+- **MsgType**: `CtrlGroupAdd (0x13)`
+- **Body Structure**:
+  ```text
+  [ConversationID 16]
+  [GroupNameLen 1][GroupName]
+  [NewUserID 16]
+  [NewUsernameLen 1][NewUsername]
+  ```
+- **Description**: Sent to ALL members (existing + new). New members use this to register the group; existing members use it to update their list.
+
+---
+
+### 2.4 Remove Member from Group
+
+#### Client -> Server
+- **MsgType**: `CtrlGroupRemove (0x14)`
+- **Body Structure**:
+  ```text
+  [ConversationID 16]
+  [UsernameLen 1][Username]
+  ```
+- **Description**: Request to remove a user by username.
+
+#### Server -> Client (Broadcast)
+- **MsgType**: `CtrlGroupRemove (0x14)`
+- **Body Structure**:
+  ```text
+  [ConversationID 16]
+  [RemovedUserID 16]
+  ```
+- **Description**: Sent to ALL members (including the removed one). Clients update their local state/UI.
+
+---
+
+### 2.5 Private Chat Initialization
+
+#### Client -> Server
+- **MsgType**: `CtrlDirectInit (0x15)`
+- **Body**: `[TargetUsername String]`
+- **Description**: Request to start a private chat.
+
+#### Server -> Client (To Sender)
+- **MsgType**: `CtrlDirectAck (0x16)`
+- **Body**: `[ConversationID 16]`
+- **Description**: Acknowledgment with the derived ConversationID.
+
+#### Server -> Client (To Target)
+- **MsgType**: `CtrlDirectInit (0x15)`
+- **Body**: `[SenderUsername String]`
+- **Description**: Notification to the target user. Header `SenderID` contains the initiator's ID.
+
+---
+
+### 2.6 Text Messaging
+
+#### Client -> Server
+- **MsgType**: `MsgText (0x01)`
+- **Header**:
+  - `ConversationID`: Target conversation
+  - `MessageID`: Random UUID
+- **Body**: `[Text Content String]`
+
+#### Server -> Client
+- **MsgType**: `MsgText (0x01)`
+- **Body**: `[Text Content String]`
+- **Description**: Relayed to all other members in the conversation.
+
+---
+
+### 2.7 File Transfer
+
+#### Metadata Packet
+- **MsgType**: `MsgFileMeta (0x02)`
+- **Body Structure**:
+  ```text
+  [NameLen 2][FileName]
+  [TypeLen 2][FileType]
+  [FileSize 8] (int64)
+  [TotalChunks 4] (int32)
+  ```
+
+#### Chunk Packet
+- **MsgType**: `MsgFileChunk (0x03)`
+- **Body Structure**:
+  ```text
+  [ChunkNo 4] (int32)
+  [ChunkData N]
+  ```
+- **Description**: File content split into 32KB chunks.

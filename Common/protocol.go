@@ -8,21 +8,34 @@ import (
 
 const IDSize = 16
 
-const HeaderSize = 16 + 16 + 16 + 1 + 4
+const HeaderSize = 16 + 16 + 16 + 1 + 2 + 4
 
 const (
+	MsgControl   uint8 = 0x00
 	MsgText      uint8 = 0x01
 	MsgFileMeta  uint8 = 0x02
 	MsgFileChunk uint8 = 0x03
 
-	CtrlLogin       uint8 = 0x10
-	CtrlLoginAck    uint8 = 0x11
-	CtrlGroupCreate uint8 = 0x12
-	CtrlGroupAdd    uint8 = 0x13
-	CtrlGroupRemove uint8 = 0x14
-	CtrlDirectInit  uint8 = 0x15
-	CtrlDirectAck   uint8 = 0x16
-	CtrlError       uint8 = 0xFF
+	CtrlLogin             uint8 = 0x10
+	CtrlLoginAck          uint8 = 0x11
+	CtrlGroupCreate       uint8 = 0x12
+	CtrlGroupAdd          uint8 = 0x13
+	CtrlGroupRemove       uint8 = 0x14
+	CtrlDirectInit        uint8 = 0x15
+	CtrlDirectAck         uint8 = 0x16
+	CtrlGroupKeyUpdate    uint8 = 0x17
+	CtrlGroupMakeAdmin    uint8 = 0x1B
+	CtrlGroupRemoveAdmin  uint8 = 0x1C
+	CtrlGroupKeyUpdateAck uint8 = 0x1A
+	CtrlPubRq             uint8 = 0x18
+	CtrlPubAck            uint8 = 0x19
+	CtrlError             uint8 = 0xFF
+
+	FlagNone      uint16 = 0
+	FlagEncrypted uint16 = 1 << 0
+	FlagHandshake uint16 = 1 << 1
+	FlagAck       uint16 = 1 << 2
+	FlagInit      uint16 = 1 << 3
 )
 
 type Header struct {
@@ -30,6 +43,7 @@ type Header struct {
 	ConversationID [IDSize]byte
 	SenderID       [IDSize]byte
 	MsgType        uint8
+	Flags          uint16
 	BodyLen        uint32
 }
 
@@ -38,13 +52,25 @@ type Packet struct {
 	Body   []byte
 }
 
+func (h *Header) Bytes() []byte {
+	buf := make([]byte, HeaderSize)
+	copy(buf[0:16], h.MessageID[:])
+	copy(buf[16:32], h.ConversationID[:])
+	copy(buf[32:48], h.SenderID[:])
+	buf[48] = h.MsgType
+	binary.BigEndian.PutUint16(buf[49:], h.Flags)
+	binary.BigEndian.PutUint32(buf[51:], h.BodyLen)
+	return buf
+}
+
 func (p *Packet) Encode(w io.Writer) error {
 	buf := make([]byte, HeaderSize)
 	copy(buf[0:16], p.Header.MessageID[:])
 	copy(buf[16:32], p.Header.ConversationID[:])
 	copy(buf[32:48], p.Header.SenderID[:])
 	buf[48] = p.Header.MsgType
-	binary.BigEndian.PutUint32(buf[49:], p.Header.BodyLen)
+	binary.BigEndian.PutUint16(buf[49:], p.Header.Flags)
+	binary.BigEndian.PutUint32(buf[51:], p.Header.BodyLen)
 
 	if _, err := w.Write(buf); err != nil {
 		return err
@@ -68,7 +94,8 @@ func Decode(r io.Reader) (Packet, error) {
 	copy(p.Header.ConversationID[:], buf[16:32])
 	copy(p.Header.SenderID[:], buf[32:48])
 	p.Header.MsgType = buf[48]
-	p.Header.BodyLen = binary.BigEndian.Uint32(buf[49:])
+	p.Header.Flags = binary.BigEndian.Uint16(buf[49:])
+	p.Header.BodyLen = binary.BigEndian.Uint32(buf[51:])
 
 	if p.Header.BodyLen > 1024*1024*100 {
 		return p, fmt.Errorf("body too large: %d", p.Header.BodyLen)
