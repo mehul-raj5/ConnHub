@@ -2,7 +2,7 @@
 mkdir -p dist
 
 echo "Building for Windows..."
-GOOS=windows GOARCH=amd64 go build -o dist/client.exe ./Clients
+GOOS=windows GOARCH=amd64 go build -o dist/client.exe ./client
 if [ $? -eq 0 ]; then
     echo "Windows build successful."
 else
@@ -10,7 +10,7 @@ else
 fi
 
 echo "Building for macOS (Intel)..."
-GOOS=darwin GOARCH=amd64 go build -o dist/client_mac_intel ./Clients
+GOOS=darwin GOARCH=amd64 go build -o dist/client_mac_intel ./client
 if [ $? -eq 0 ]; then
     echo "macOS (Intel) build successful."
 else
@@ -18,7 +18,7 @@ else
 fi
 
 echo "Building for macOS (Apple Silicon)..."
-GOOS=darwin GOARCH=arm64 go build -o dist/client_mac_silicon ./Clients
+GOOS=darwin GOARCH=arm64 go build -o dist/client_mac_silicon ./client
 if [ $? -eq 0 ]; then
     echo "macOS (Apple Silicon) build successful."
 else
@@ -26,7 +26,7 @@ else
 fi
 
 echo "Building for Linux..."
-GOOS=linux GOARCH=amd64 go build -o dist/client_linux ./Clients
+GOOS=linux GOARCH=amd64 go build -o dist/client_linux ./client
 if [ $? -eq 0 ]; then
     echo "Linux build successful."
 else

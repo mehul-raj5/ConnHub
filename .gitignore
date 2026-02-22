@@ -2,11 +2,14 @@
 /*
 
 # Except these core directories and files
-!/Clients/
-!/Server/
-!/Common/
+!/client/
+!/server/
+!/common/
 !/README.md
 !/.gitignore
+!/go.work
+!/go.work.sum
+!/build_clients.sh
 
 # General exclusions
 *.key
@@ -16,17 +19,15 @@
 *.app
 
 # Compiled binaries
-Clients/client
-Clients/Clients
-Server/Server
-Server/server
+client/client
+server/server
 bin/
 dist/
 
 # OS generated files
 .DS_Store
-/Clients/downloads/
-/Clients/data_received/
+/client/downloads/
+/client/data_received/
 /data/
 
 # Go workspaces and caches
@@ -35,7 +36,4 @@ dist/
 .gotmp/
 local_cache/
 local_tmp/
-dist/
-bin/
-/client
-.DS_Store
+tmp/
