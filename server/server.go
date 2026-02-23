@@ -28,9 +28,28 @@ type Client struct {
 type Conversation struct {
 	ID      [common.IDSize]byte
 	Name    string
+	Creator [common.IDSize]byte
 	Admins  map[[common.IDSize]byte]struct{}
-	Members map[[common.IDSize]byte]struct{}
+	Members [][common.IDSize]byte
 	IsGroup bool
+}
+
+func (c *Conversation) HasMember(id [common.IDSize]byte) bool {
+	for _, m := range c.Members {
+		if m == id {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Conversation) RemoveMember(id [common.IDSize]byte) {
+	for i, m := range c.Members {
+		if m == id {
+			c.Members = append(c.Members[:i], c.Members[i+1:]...)
+			return
+		}
+	}
 }
 
 type Server struct {
@@ -199,11 +218,11 @@ func (s *Server) handleGroupAdd(sender *Client, p common.Packet) {
 	}
 
 	s.mu.Lock()
-	if _, exists := conv.Members[targetID]; exists {
+	if conv.HasMember(targetID) {
 		s.mu.Unlock()
 		return
 	}
-	conv.Members[targetID] = struct{}{}
+	conv.Members = append(conv.Members, targetID)
 	s.mu.Unlock()
 
 	respBody := make([]byte, 0)
@@ -224,15 +243,68 @@ func (s *Server) handleGroupAdd(sender *Client, p common.Packet) {
 		Body: respBody,
 	}
 
+
+	syncBody := make([]byte, 0)
+	syncBody = append(syncBody, convID[:]...)
+	syncBody = append(syncBody, byte(len(conv.Name)))
+	syncBody = append(syncBody, []byte(conv.Name)...)
+
 	s.mu.RLock()
+	syncBody = append(syncBody, byte(len(conv.Members)))
+	for _, mID := range conv.Members {
+		user := s.users[mID]
+		name := "Unknown"
+		if user != nil {
+			name = user.Username
+		}
+		syncBody = append(syncBody, mID[:]...)
+		syncBody = append(syncBody, byte(len(name)))
+		syncBody = append(syncBody, []byte(name)...)
+	}
+	var adminsList [][16]byte
+	for aID := range conv.Admins {
+		if aID != sender.UserID {
+			adminsList = append(adminsList, aID)
+		}
+	}
 	members := make([][16]byte, 0, len(conv.Members))
-	for m := range conv.Members {
+	for _, m := range conv.Members {
 		members = append(members, m)
 	}
 	s.mu.RUnlock()
 
+	syncResp := common.Packet{
+		Header: common.Header{
+			MsgType:        common.CtrlGroupCreate,
+			ConversationID: convID,
+			SenderID:       sender.UserID,
+			BodyLen:        uint32(len(syncBody)),
+		},
+		Body: syncBody,
+	}
+
 	for _, m := range members {
-		s.sendPacket(m, resp)
+		if m == targetID {
+			s.sendPacket(m, syncResp)
+
+			for _, aID := range adminsList {
+				adminRespBody := make([]byte, 32)
+				copy(adminRespBody[0:16], convID[:])
+				copy(adminRespBody[16:32], aID[:])
+
+				aResp := common.Packet{
+					Header: common.Header{
+						MsgType:  common.CtrlGroupMakeAdmin,
+						SenderID: sender.UserID,
+						BodyLen:  32,
+					},
+					Body: adminRespBody,
+				}
+				s.sendPacket(targetID, aResp)
+			}
+		} else {
+			s.sendPacket(m, resp)
+		}
 	}
 }
 
@@ -266,9 +338,24 @@ func (s *Server) handleGroupRemove(sender *Client, p common.Packet) {
 	targetName := string(p.Body[offset : offset+uLen])
 	targetID := s.getOrCreateUser(targetName, [32]byte{})
 
+	if targetID == conv.Creator {
+		log.Printf("[WARNING] Cannot remove creator from group")
+		return
+	}
+
 	s.mu.Lock()
 	if c, ok := s.convs[convID]; ok {
-		delete(c.Members, targetID)
+		c.RemoveMember(targetID)
+		wasAdmin := false
+		if _, ok := c.Admins[targetID]; ok {
+			delete(c.Admins, targetID)
+			wasAdmin = true
+		}
+		if wasAdmin && len(c.Admins) == 0 && len(c.Members) > 0 {
+			newAdmin := c.Members[0]
+			c.Admins[newAdmin] = struct{}{}
+			go s.broadcastMakeAdmin(convID, newAdmin)
+		}
 	}
 	s.mu.Unlock()
 
@@ -287,7 +374,7 @@ func (s *Server) handleGroupRemove(sender *Client, p common.Packet) {
 
 	s.mu.RLock()
 	members := make([][16]byte, 0, len(conv.Members))
-	for m := range conv.Members {
+	for _, m := range conv.Members {
 		members = append(members, m)
 	}
 	s.mu.RUnlock()
@@ -329,7 +416,7 @@ func (s *Server) handleGroupMakeAdmin(sender *Client, p common.Packet) {
 	targetID := s.getOrCreateUser(targetName, [32]byte{})
 
 	s.mu.Lock()
-	if _, exists := conv.Members[targetID]; !exists {
+	if !conv.HasMember(targetID) {
 		s.mu.Unlock()
 		return
 	}
@@ -351,7 +438,7 @@ func (s *Server) handleGroupMakeAdmin(sender *Client, p common.Packet) {
 
 	s.mu.RLock()
 	members := make([][16]byte, 0, len(conv.Members))
-	for m := range conv.Members {
+	for _, m := range conv.Members {
 		members = append(members, m)
 	}
 	s.mu.RUnlock()
@@ -391,6 +478,11 @@ func (s *Server) handleGroupRemoveAdmin(sender *Client, p common.Packet) {
 	targetName := string(p.Body[offset : offset+uLen])
 	targetID := s.getOrCreateUser(targetName, [32]byte{})
 
+	if targetID == conv.Creator {
+		log.Printf("[WARNING] Cannot demote creator from admins")
+		return
+	}
+
 	s.mu.Lock()
 	delete(conv.Admins, targetID)
 	s.mu.Unlock()
@@ -410,7 +502,7 @@ func (s *Server) handleGroupRemoveAdmin(sender *Client, p common.Packet) {
 
 	s.mu.RLock()
 	members := make([][16]byte, 0, len(conv.Members))
-	for m := range conv.Members {
+	for _, m := range conv.Members {
 		members = append(members, m)
 	}
 	s.mu.RUnlock()
@@ -430,7 +522,7 @@ func (s *Server) handleData(sender *Client, p common.Packet) {
 		return
 	}
 
-	for memberID := range conv.Members {
+	for _, memberID := range conv.Members {
 		if memberID == sender.UserID {
 			continue
 		}
@@ -489,12 +581,15 @@ func (s *Server) handleGroupCreate(sender *Client, p common.Packet) {
 	conv := &Conversation{
 		ID:      convID,
 		Name:    groupName,
+		Creator: sender.UserID,
 		IsGroup: true,
 		Admins:  make(map[[common.IDSize]byte]struct{}),
-		Members: make(map[[common.IDSize]byte]struct{}),
+		Members: make([][common.IDSize]byte, 0),
 	}
 	for _, mid := range memberIDs {
-		conv.Members[mid] = struct{}{}
+		if !conv.HasMember(mid) {
+			conv.Members = append(conv.Members, mid)
+		}
 	}
 	conv.Admins[sender.UserID] = struct{}{}
 
@@ -509,7 +604,7 @@ func (s *Server) handleGroupCreate(sender *Client, p common.Packet) {
 	respBody = append(respBody, byte(len(conv.Members)))
 
 	s.mu.RLock()
-	for mID := range conv.Members {
+	for _, mID := range conv.Members {
 		user := s.users[mID]
 		name := "Unknown"
 		if user != nil {
@@ -531,7 +626,7 @@ func (s *Server) handleGroupCreate(sender *Client, p common.Packet) {
 		Body: respBody,
 	}
 
-	for mID := range conv.Members {
+	for _, mID := range conv.Members {
 		s.sendPacket(mID, resp)
 	}
 }
@@ -560,12 +655,12 @@ func (s *Server) handleDirectInit(sender *Client, p common.Packet) {
 	if !exists {
 		conv := &Conversation{
 			ID:      convID,
-			Members: make(map[[common.IDSize]byte]struct{}),
+			Members: make([][common.IDSize]byte, 0),
 			Admins:  make(map[[common.IDSize]byte]struct{}),
 			IsGroup: false,
 		}
-		conv.Members[sender.UserID] = struct{}{}
-		conv.Members[targetID] = struct{}{}
+		conv.Members = append(conv.Members, sender.UserID)
+		conv.Members = append(conv.Members, targetID)
 		s.convs[convID] = conv
 	}
 
@@ -728,6 +823,34 @@ func genID() [16]byte {
 		panic(err)
 	}
 	return id
+}
+
+func (s *Server) broadcastMakeAdmin(convID, targetID [common.IDSize]byte) {
+	respBody := make([]byte, 32)
+	copy(respBody[0:16], convID[:])
+	copy(respBody[16:32], targetID[:])
+	resp := common.Packet{
+		Header: common.Header{
+			MsgType:  common.CtrlGroupMakeAdmin,
+			SenderID: [16]byte{},
+			BodyLen:  32,
+		},
+		Body: respBody,
+	}
+	s.mu.RLock()
+	conv, ok := s.convs[convID]
+	if !ok {
+		s.mu.RUnlock()
+		return
+	}
+	members := make([][16]byte, 0, len(conv.Members))
+	for _, m := range conv.Members {
+		members = append(members, m)
+	}
+	s.mu.RUnlock()
+	for _, m := range members {
+		s.sendPacket(m, resp)
+	}
 }
 
 func main() {

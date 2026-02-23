@@ -34,8 +34,9 @@ type ClientManager struct {
 type ConversationInfo struct {
 	Name    string
 	IsGroup bool
+	Creator [common.IDSize]byte
 	Admins  map[[common.IDSize]byte]struct{}
-	Members map[[common.IDSize]byte]struct{}
+	Members [][common.IDSize]byte
 }
 
 func NewClientManager(userID [common.IDSize]byte, username string) *ClientManager {
@@ -58,7 +59,7 @@ func (m *ClientManager) RegisterConversation(id [common.IDSize]byte, name string
 		Name:    name,
 		IsGroup: isGroup,
 		Admins:  make(map[[common.IDSize]byte]struct{}),
-		Members: make(map[[common.IDSize]byte]struct{}),
+		Members: make([][common.IDSize]byte, 0),
 	}
 	fmt.Printf("\n[INFO] Conversation registered: %s\n> ", name)
 }
@@ -82,7 +83,17 @@ func (m *ClientManager) AddMemberToGroup(groupID, userID [common.IDSize]byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if info, ok := m.Conversations[groupID]; ok {
-		info.Members[userID] = struct{}{}
+		exists := false
+		for _, id := range info.Members {
+			if id == userID {
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			info.Members = append(info.Members, userID)
+			m.Conversations[groupID] = info
+		}
 	}
 }
 
@@ -90,7 +101,13 @@ func (m *ClientManager) RemoveMemberFromGroup(groupID, userID [common.IDSize]byt
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if info, ok := m.Conversations[groupID]; ok {
-		delete(info.Members, userID)
+		for i, id := range info.Members {
+			if id == userID {
+				info.Members = append(info.Members[:i], info.Members[i+1:]...)
+				m.Conversations[groupID] = info
+				break
+			}
+		}
 	}
 }
 
@@ -99,7 +116,7 @@ func (m *ClientManager) GetGroupMembers(groupID [common.IDSize]byte) [][common.I
 	defer m.mu.Unlock()
 	var members [][common.IDSize]byte
 	if info, ok := m.Conversations[groupID]; ok {
-		for id := range info.Members {
+		for _, id := range info.Members {
 			members = append(members, id)
 		}
 	}
@@ -155,6 +172,17 @@ func (m *ClientManager) IsUserAdmin(groupID [common.IDSize]byte, userID [common.
 	if info, ok := m.Conversations[groupID]; ok {
 		_, isAdmin := info.Admins[userID]
 		return isAdmin
+	}
+	return false
+}
+
+func (m *ClientManager) IsGroupCreator(groupID [common.IDSize]byte, userID [common.IDSize]byte) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if info, ok := m.Conversations[groupID]; ok {
+		if len(info.Members) > 0 {
+			return info.Members[0] == userID
+		}
 	}
 	return false
 }
