@@ -11,10 +11,11 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 const StandardChunkSize = 32 * 1024
@@ -30,22 +31,29 @@ var (
 )
 
 func main() {
+	f, err := os.OpenFile("client.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		fmt.Printf("Error opening client.log: %v\n", err)
+	} else {
+		log.SetOutput(f)
+		defer f.Close()
+	}
+
 	reader = bufio.NewReader(os.Stdin)
 
-	var err error
 	idMgr, err = NewIdentityManager()
 	if err != nil {
 		log.Fatalf("Failed to init identity: %v", err)
 	}
 
-	fmt.Print("Enter server address (default :8080): ")
+	tuiPrint("Enter server address (default :8080): ")
 	addr, _ := reader.ReadString('\n')
 	addr = strings.TrimSpace(addr)
 	if addr == "" {
 		addr = ":8080"
 	}
 
-	fmt.Print("Enter your username: ")
+	tuiPrint("Enter your username: ")
 	username, _ := reader.ReadString('\n')
 	username = strings.TrimSpace(username)
 
@@ -61,12 +69,16 @@ func main() {
 	}
 
 	mgr = NewClientManager(userID, username)
-	fmt.Printf("[DEBUG] main: mgr.UserID set to %x\n", mgr.UserID)
+	log.Printf("[DEBUG] main: mgr.UserID set to %x\n", mgr.UserID)
 	sessionMgr = NewSessionManager(idMgr)
 
 	go readLoop()
 
-	inputLoop()
+	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
+	program = p
+	if _, err := p.Run(); err != nil {
+		log.Fatalf("Error running program: %v", err)
+	}
 }
 
 func performHandshake(username string, pubKey [32]byte) ([16]byte, error) {
@@ -96,7 +108,7 @@ func performHandshake(username string, pubKey [32]byte) ([16]byte, error) {
 
 	var userID [16]byte
 	copy(userID[:], resp.Body)
-	fmt.Printf("Logged in! UserID: %x\n", userID)
+	tuiPrintf("Logged in! UserID: %x", userID)
 	return userID, nil
 }
 
@@ -105,7 +117,7 @@ func readLoop() {
 		pkt, err := common.Decode(conn)
 		if err != nil {
 			if err != io.EOF {
-				fmt.Printf("\n[ERROR] Disconnected: %v\n", err)
+				tuiPrintf("[ERROR] Disconnected: %v", err)
 			}
 			os.Exit(1)
 		}
@@ -137,14 +149,23 @@ func readLoop() {
 				if err := sessionMgr.HandleHandshake(pkt); err != nil {
 					log.Printf("Handshake failed: %v", err)
 				} else {
-					fmt.Printf("[INFO] Secure Session established with %s\n> ", sender)
+					tuiPrintf("[INFO] Secure Session established with %s", sender)
 				}
 			}
 
 		case common.MsgText:
 			name := mgr.GetConversationName(pkt.Header.ConversationID)
 			sender := mgr.GetUsername(pkt.Header.SenderID)
-			fmt.Printf("\n[%s] %s: %s\n> ", name, sender, string(pkt.Body))
+			if program != nil {
+				go program.Send(NetworkMsg{
+					ConversationID: pkt.Header.ConversationID,
+					SenderName:     sender,
+					Content:        string(pkt.Body),
+					IsSystemMeta:   false,
+				})
+			} else {
+				fmt.Printf("[%s] %s: %s\n", name, sender, string(pkt.Body))
+			}
 
 		case common.MsgFileMeta:
 			meta, err := common.DecodeFileMetadata(pkt.Body)
@@ -153,7 +174,7 @@ func readLoop() {
 				continue
 			}
 			sender := mgr.GetUsername(pkt.Header.SenderID)
-			fmt.Printf("\n[%s] Receiving file from %s: %s (%d bytes)\n> ",
+			tuiPrintf("[%s] Receiving file from %s: %s (%d bytes)",
 				mgr.GetConversationName(pkt.Header.ConversationID),
 				sender, meta.FileName, meta.FileSize)
 			mgr.HandleFileMeta(pkt.Header.MessageID, meta)
@@ -178,17 +199,17 @@ func readLoop() {
 			mgr.RegisterConversation(convID, "Private Chat", false)
 
 			if _, ok := sessionMgr.GetSession(convID); ok {
-				fmt.Printf("[INFO] Session already exists for %x, skipping handshake.\n", convID[:4])
+				tuiPrintf("[INFO] Session already exists for %x, skipping handshake.", convID[:4])
 				continue
 			}
 
-			fmt.Printf("[INFO] Key Exchange Initiating...\n")
+			tuiPrintln("[INFO] Key Exchange Initiating...")
 
 			handshakePkt, err := sessionMgr.PerformHandshake(convID, peerKey)
 			if err == nil {
 				sendPacket(handshakePkt)
 			} else {
-				fmt.Printf("[ERROR] Handshake init failed: %v\n", err)
+				tuiPrintf("[ERROR] Handshake init failed: %v", err)
 			}
 
 		case common.CtrlDirectInit:
@@ -202,7 +223,7 @@ func readLoop() {
 			mgr.AddUser(pkt.Header.SenderID, senderName)
 			mgr.RegisterConversation(pkt.Header.ConversationID, "Private Chat: "+senderName, false)
 
-			fmt.Printf("[INFO] Private Chat requested by %s. Waiting for Handshake...\n", senderName)
+			tuiPrintf("[INFO] Private Chat requested by %s. Waiting for Handshake...", senderName)
 
 		case common.CtrlGroupCreate:
 			if len(pkt.Body) < 17 {
@@ -239,10 +260,10 @@ func readLoop() {
 
 			mgr.SetGroupAdmin(convID, pkt.Header.SenderID, true)
 
-			fmt.Printf("[DEBUG] CtrlGroupCreate: Packet SenderID=%x, My UserID=%x\n", pkt.Header.SenderID, mgr.UserID)
+			log.Printf("[DEBUG] CtrlGroupCreate: Packet SenderID=%x, My UserID=%x\n", pkt.Header.SenderID, mgr.UserID)
 			if pkt.Header.SenderID == mgr.UserID {
-				fmt.Printf("[INFO] You are Admin of group %s. Initializing Key...\n", groupName)
-				fmt.Printf("[DEBUG] readLoop: Triggering initial rotation for %x\n", convID)
+				tuiPrintf("[INFO] You are Admin of group %s. Initializing Key...", groupName)
+				log.Printf("[DEBUG] readLoop: Triggering initial rotation for %x\n", convID)
 				go rotateGroupKey(convID)
 			}
 
@@ -278,7 +299,7 @@ func readLoop() {
 			userName := string(pkt.Body[offset : offset+uNameLen])
 			mgr.AddUser(userID, userName)
 			mgr.AddMemberToGroup(convID, userID)
-			fmt.Printf("\n[INFO] User %s added to group %s\n> ", userName, groupName)
+			tuiPrintf("[INFO] User %s added to group %s", userName, groupName)
 
 			if mgr.IsGroupAdmin(convID) && pkt.Header.SenderID == mgr.UserID {
 				go rotateGroupKey(convID)
@@ -296,7 +317,7 @@ func readLoop() {
 			uName := mgr.GetUsername(userID)
 			groupName := mgr.GetConversationName(convID)
 			mgr.RemoveMemberFromGroup(convID, userID)
-			fmt.Printf("\n[INFO] User %s removed from group %s\n> ", uName, groupName)
+			tuiPrintf("[INFO] User %s removed from group %s", uName, groupName)
 
 			if mgr.IsGroupAdmin(convID) && pkt.Header.SenderID == mgr.UserID {
 				go rotateGroupKey(convID)
@@ -314,7 +335,7 @@ func readLoop() {
 			uName := mgr.GetUsername(userID)
 			groupName := mgr.GetConversationName(convID)
 			mgr.SetGroupAdmin(convID, userID, true)
-			fmt.Printf("\n[INFO] User %s is now an Admin of group %s\n> ", uName, groupName)
+			tuiPrintf("[INFO] User %s is now an Admin of group %s", uName, groupName)
 
 		case common.CtrlGroupRemoveAdmin:
 			if len(pkt.Body) < 32 {
@@ -328,7 +349,7 @@ func readLoop() {
 			uName := mgr.GetUsername(userID)
 			groupName := mgr.GetConversationName(convID)
 			mgr.SetGroupAdmin(convID, userID, false)
-			fmt.Printf("\n[INFO] User %s is no longer an Admin of group %s\n> ", uName, groupName)
+			tuiPrintf("[INFO] User %s is no longer an Admin of group %s", uName, groupName)
 
 		case common.CtrlPubAck:
 			if len(pkt.Body) < 48 {
@@ -357,7 +378,7 @@ func readLoop() {
 			}
 
 			sessionMgr.CreateGroupSession(groupID, key, version, false)
-			fmt.Printf("\n[INFO] Group Key Updated for %s (v%d)\n> ", mgr.GetConversationName(groupID), version)
+			tuiPrintf("[INFO] Group Key Updated for %s (v%d)", mgr.GetConversationName(groupID), version)
 
 			ackBody := make([]byte, 20)
 			copy(ackBody[:16], groupID[:])
@@ -379,62 +400,17 @@ func readLoop() {
 	}
 }
 
-func inputLoop() {
-	for {
-		fmt.Println("\n=== MENU ===")
-		fmt.Println("1. Create Group")
-		fmt.Println("2. Start Private Chat")
-		fmt.Println("3. Send Message")
-		fmt.Println("4. Send File")
-		fmt.Println("5. List Conversations")
-		fmt.Println("6. Add Member to Group")
-		fmt.Println("7. Remove Member from Group")
-		fmt.Println("8. Make Member Admin")
-		fmt.Println("9. Remove Admin")
-		fmt.Print("> ")
-
-		line, _ := reader.ReadString('\n')
-		choice := strings.TrimSpace(line)
-
-		switch choice {
-		case "1":
-			createGroup()
-		case "2":
-			startPrivateChat()
-		case "3":
-			sendMessage(false)
-		case "4":
-			sendMessage(true)
-		case "5":
-			listConversations()
-		case "6":
-			addMember()
-		case "7":
-			removeMember()
-		case "8":
-			makeGroupAdmin()
-		case "9":
-			removeGroupAdmin()
-		}
-		time.Sleep(100 * time.Millisecond)
+func createGroup(name string, users []string) {
+	if name == "" {
+		tuiPrintln("Group Name cannot be empty")
+		return
 	}
-}
-
-func createGroup() {
-	fmt.Print("Group Name: ")
-	name, _ := reader.ReadString('\n')
-	name = strings.TrimSpace(name)
-
-	fmt.Print("Enter usernames (comma separated): ")
-	users, _ := reader.ReadString('\n')
-	parts := strings.Split(users, ",")
-
 	body := make([]byte, 0)
 	body = append(body, byte(len(name)))
 	body = append(body, []byte(name)...)
-	body = append(body, byte(len(parts)))
+	body = append(body, byte(len(users)))
 
-	for _, u := range parts {
+	for _, u := range users {
 		u = strings.TrimSpace(u)
 		body = append(body, byte(len(u)))
 		body = append(body, []byte(u)...)
@@ -450,11 +426,11 @@ func createGroup() {
 	sendPacket(&pkt)
 }
 
-func startPrivateChat() {
-	fmt.Print("Target Username: ")
-	name, _ := reader.ReadString('\n')
-	name = strings.TrimSpace(name)
-
+func startPrivateChat(name string) {
+	if name == "" {
+		tuiPrintln("Target username cannot be empty")
+		return
+	}
 	pkt := common.Packet{
 		Header: common.Header{
 			MsgType: common.CtrlDirectInit,
@@ -474,27 +450,20 @@ func listConversations() {
 		if info.IsGroup {
 			typeStr = "Group"
 		}
-		fmt.Printf("%d. %s [%s] (%x)\n", i, info.Name, typeStr, id[:4])
+		tuiPrintf("%d. %s [%s] (%x)", i, info.Name, typeStr, id[:4])
 		i++
 	}
 }
 
-func addMember() {
-	convID, ok := selectConversation("Select Group: ")
-	if !ok {
-		return
-	}
+func addMember(convID [16]byte, username string) {
 	if !mgr.IsGroup(convID) {
-		fmt.Println("Error: This is not a group.")
+		tuiPrintln("Error: This is not a group.")
 		return
 	}
 	if !mgr.IsGroupAdmin(convID) {
-		fmt.Println("Error: Only admins can add members.")
+		tuiPrintln("Error: Only admins can perform this action.")
 		return
 	}
-	fmt.Print("Enter username to add: ")
-	username, _ := reader.ReadString('\n')
-	username = strings.TrimSpace(username)
 	if username == "" {
 		return
 	}
@@ -512,25 +481,18 @@ func addMember() {
 		Body: body,
 	}
 	sendPacket(&pkt)
-	fmt.Println("Add member request sent.")
+	tuiPrintln("Add member request sent.")
 }
 
-func removeMember() {
-	convID, ok := selectConversation("Select Group: ")
-	if !ok {
-		return
-	}
+func removeMember(convID [16]byte, username string) {
 	if !mgr.IsGroup(convID) {
-		fmt.Println("Error: This is not a group.")
+		tuiPrintln("Error: This is not a group.")
 		return
 	}
 	if !mgr.IsGroupAdmin(convID) {
-		fmt.Println("Error: Only admins can remove members.")
+		tuiPrintln("Error: Only admins can perform this action.")
 		return
 	}
-	fmt.Print("Enter username to remove: ")
-	username, _ := reader.ReadString('\n')
-	username = strings.TrimSpace(username)
 	if username == "" {
 		return
 	}
@@ -548,25 +510,18 @@ func removeMember() {
 		Body: body,
 	}
 	sendPacket(&pkt)
-	fmt.Println("Remove member request sent.")
+	tuiPrintln("Remove member request sent.")
 }
 
-func makeGroupAdmin() {
-	convID, ok := selectConversation("Select Group: ")
-	if !ok {
-		return
-	}
+func makeGroupAdmin(convID [16]byte, username string) {
 	if !mgr.IsGroup(convID) {
-		fmt.Println("Error: This is not a group.")
+		tuiPrintln("Error: This is not a group.")
 		return
 	}
 	if !mgr.IsGroupAdmin(convID) {
-		fmt.Println("Error: Only admins can promote other members.")
+		tuiPrintln("Error: Only admins can perform this action.")
 		return
 	}
-	fmt.Print("Enter username to make Admin: ")
-	username, _ := reader.ReadString('\n')
-	username = strings.TrimSpace(username)
 	if username == "" {
 		return
 	}
@@ -584,25 +539,18 @@ func makeGroupAdmin() {
 		Body: body,
 	}
 	sendPacket(&pkt)
-	fmt.Println("Make admin request sent.")
+	tuiPrintln("Make admin request sent.")
 }
 
-func removeGroupAdmin() {
-	convID, ok := selectConversation("Select Group: ")
-	if !ok {
-		return
-	}
+func removeGroupAdmin(convID [16]byte, username string) {
 	if !mgr.IsGroup(convID) {
-		fmt.Println("Error: This is not a group.")
+		tuiPrintln("Error: This is not a group.")
 		return
 	}
 	if !mgr.IsGroupAdmin(convID) {
-		fmt.Println("Error: Only admins can demote admins.")
+		tuiPrintln("Error: Only admins can perform this action.")
 		return
 	}
-	fmt.Print("Enter username to remove from Admin: ")
-	username, _ := reader.ReadString('\n')
-	username = strings.TrimSpace(username)
 	if username == "" {
 		return
 	}
@@ -620,101 +568,16 @@ func removeGroupAdmin() {
 		Body: body,
 	}
 	sendPacket(&pkt)
-	fmt.Println("Remove admin request sent.")
+	tuiPrintln("Remove admin request sent.")
 }
 
-func selectConversation(prompt string) ([16]byte, bool) {
-	mgr.mu.Lock()
-	convs := make([][16]byte, 0, len(mgr.Conversations))
-	names := make([]string, 0, len(mgr.Conversations))
-	for id, info := range mgr.Conversations {
-		convs = append(convs, id)
-		names = append(names, info.Name)
-	}
-	mgr.mu.Unlock()
-
-	if len(convs) == 0 {
-		fmt.Println("No active conversations.")
-		return [16]byte{}, false
-	}
-
-	for i, n := range names {
-		fmt.Printf("%d. %s\n", i, n)
-	}
-	fmt.Print(prompt)
-	idxStr, _ := reader.ReadString('\n')
-	idx, _ := strconv.Atoi(strings.TrimSpace(idxStr))
-
-	if idx < 0 || idx >= len(convs) {
-		fmt.Println("Invalid selection")
-		return [16]byte{}, false
-	}
-	return convs[idx], true
-}
-
-func sendMessage(isFile bool) {
-	convID, ok := selectConversation("Select conversation: ")
-	if !ok {
+func sendFile(convID [16]byte, path string) {
+	if path == "" {
 		return
 	}
-	if isFile {
-		sendFile(convID)
-	} else {
-		sendText(convID)
-	}
-}
-
-func sendText(convID [16]byte) {
-	fmt.Print("Message: ")
-	msg, _ := reader.ReadString('\n')
-	msg = strings.TrimSpace(msg)
-
-	pkt := common.Packet{
-		Header: common.Header{
-			MsgType:        common.MsgText,
-			ConversationID: convID,
-			MessageID:      genID(),
-			SenderID:       mgr.UserID,
-			BodyLen:        uint32(len(msg)),
-		},
-		Body: []byte(msg),
-	}
-
-	if mgr.IsGroup(convID) {
-		fmt.Printf("[DEBUG] sendText: Encrypting for GroupID %x\n", convID)
-
-		rotationMu.Lock()
-		err := sessionMgr.EncryptGroupPacket(&pkt)
-		rotationMu.Unlock()
-
-		if err != nil {
-			fmt.Printf("[ERROR] Group Encryption failed: %v\n", err)
-			return
-		}
-		if sess, ok := sessionMgr.GetGroupSession(convID); ok {
-			sess.IncrementCounter()
-			if sess.ShouldRotate() && mgr.IsGroupAdmin(convID) {
-				go rotateGroupKey(convID)
-			}
-		}
-	} else {
-		if err := sessionMgr.EncryptPacket(&pkt); err != nil {
-			fmt.Printf("[ERROR] %v. Please ensure Handshake is complete.\n", err)
-			return
-		}
-	}
-
-	sendPacket(&pkt)
-}
-
-func sendFile(convID [16]byte) {
-	fmt.Print("File Path: ")
-	path, _ := reader.ReadString('\n')
-	path = strings.TrimSpace(path)
-
 	f, err := os.Open(path)
 	if err != nil {
-		fmt.Println("Error opening file:", err)
+		tuiPrintln("Error opening file:", err)
 		return
 	}
 	defer f.Close()
@@ -749,7 +612,7 @@ func sendFile(convID [16]byte) {
 		rotationMu.Unlock()
 
 		if err != nil {
-			fmt.Printf("[ERROR] Group Encryption failed for meta: %v\n", err)
+			tuiPrintf("[ERROR] Group Encryption failed for meta: %v", err)
 			return
 		}
 		if sess, ok := sessionMgr.GetGroupSession(convID); ok {
@@ -760,7 +623,7 @@ func sendFile(convID [16]byte) {
 		}
 	} else {
 		if err := sessionMgr.EncryptPacket(&metaPkt); err != nil {
-			fmt.Printf("[ERROR] Encryption failed for meta: %v\n", err)
+			tuiPrintf("[ERROR] Encryption failed for meta: %v", err)
 			return
 		}
 	}
@@ -799,20 +662,19 @@ func sendFile(convID [16]byte) {
 			rotationMu.Unlock()
 
 			if err != nil {
-				fmt.Printf("[ERROR] Group Encryption failed for chunk: %v\n", err)
-				return
+				tuiPrintf("[ERROR] Group Encryption failed for chunk: %v", err)
+				continue
 			}
 		} else {
 			if err := sessionMgr.EncryptPacket(&chkPkt); err != nil {
-				fmt.Printf("[ERROR] Encryption failed for chunk: %v\n", err)
-				return
+				tuiPrintf("[ERROR] Encryption failed for chunk: %v", err)
+				continue
 			}
 		}
 		sendPacket(&chkPkt)
 		chunkNo++
-		time.Sleep(1 * time.Millisecond)
 	}
-	fmt.Println("File sent!")
+	tuiPrintln("File sent!")
 }
 
 func genID() [16]byte {
@@ -843,10 +705,10 @@ func rotateGroupKey(groupID [16]byte) {
 	rotationMu.Lock()
 	defer rotationMu.Unlock()
 
-	fmt.Printf("[DEBUG] rotateGroupKey: Starting rotation for %x\n", groupID)
+	log.Printf("[DEBUG] rotateGroupKey: Starting rotation for %x\n", groupID)
 
 	if !mgr.IsGroupAdmin(groupID) {
-		fmt.Printf("[DEBUG] rotateGroupKey: Not admin for %x, aborting\n", groupID)
+		log.Printf("[DEBUG] rotateGroupKey: Not admin for %x, aborting\n", groupID)
 		return
 	}
 
@@ -862,13 +724,13 @@ func rotateGroupKey(groupID [16]byte) {
 	}
 
 	members := mgr.GetGroupMembers(groupID)
-	fmt.Printf("[DEBUG] rotateGroupKey: Found %d members for group %x\n", len(members), groupID)
+	log.Printf("[DEBUG] rotateGroupKey: Found %d members for group %x\n", len(members), groupID)
 
 	for _, memberID := range members {
 		if memberID == mgr.UserID {
 			continue
 		}
-		fmt.Printf("[DEBUG] rotateGroupKey: Processing member %x\n", memberID)
+		tuiPrintf("[DEBUG] rotateGroupKey: Processing member %x\n", memberID)
 
 		convID := common.HashIDs(mgr.UserID, memberID)
 		if _, ok := sessionMgr.GetSession(convID); !ok {
@@ -881,7 +743,7 @@ func rotateGroupKey(groupID [16]byte) {
 				Body: []byte(memberUName),
 			}
 			sendPacket(&initPkt)
-			fmt.Printf("[DEBUG] rotateGroupKey: Sent CtrlDirectInit for %s\n", memberUName)
+			log.Printf("[DEBUG] rotateGroupKey: Sent CtrlDirectInit for %s\n", memberUName)
 
 			established := false
 			for i := 0; i < 50; i++ {
@@ -919,12 +781,12 @@ func rotateGroupKey(groupID [16]byte) {
 		}
 
 		sendPacket(&pkt)
-		fmt.Printf("[DEBUG] rotateGroupKey: Sent Key Update to %x\n", memberID)
+		log.Printf("[DEBUG] rotateGroupKey: Sent Key Update to %x\n", memberID)
 	}
 
 	time.Sleep(500 * time.Millisecond)
 
 	sessionMgr.CreateGroupSession(groupID, newKey, newVersion, true)
-	fmt.Printf("\n[INFO] Rotated Group Key to v%d\n> ", newVersion)
-	fmt.Printf("[DEBUG] rotateGroupKey: Created session for GroupID %x\n", groupID)
+	tuiPrintf("[INFO] Rotated Group Key to v%d", newVersion)
+	log.Printf("[DEBUG] rotateGroupKey: Created session for GroupID %x\n", groupID)
 }

@@ -37,7 +37,6 @@ type GroupSession struct {
 }
 
 type SessionManager struct {
-	// sessions maps ConversationID to Session
 	sessions      map[[16]byte]*Session
 	groupSessions map[[16]byte]*GroupSession
 	mu            sync.RWMutex

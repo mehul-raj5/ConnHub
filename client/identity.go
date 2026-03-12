@@ -2,8 +2,8 @@ package main
 
 import (
 	common "common"
-	"fmt"
 	"io"
+	"log"
 	"os"
 
 	"golang.org/x/crypto/curve25519"
@@ -35,14 +35,13 @@ func (im *IdentityManager) loadOrGenerate() error {
 		}
 		copy(im.PrivateKey[:], buf[:32])
 
-		// CRITICAL: Derive Public Key from Private Key to ensure consistency
 		curve25519.ScalarBaseMult(&im.PublicKey, &im.PrivateKey)
 
-		fmt.Printf("Loaded Identity Key: %x... (derived from priv)\n", im.PublicKey[:4])
+		log.Printf("Loaded Identity Key: %x... (derived from priv)\n", im.PublicKey[:4])
 		return nil
 	}
 
-	fmt.Println("Generating new Identity Keys...")
+	log.Println("Generating new Identity Keys...")
 	priv, pub, err := common.GenerateIdentityKeys()
 	if err != nil {
 		return err

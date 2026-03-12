@@ -7,7 +7,6 @@ import (
 )
 
 func TestRatchetLogic(t *testing.T) {
-	// 1. Setup Identities (In-Memory)
 	alicePriv, alicePub, _ := common.GenerateIdentityKeys()
 	aliceID := &IdentityManager{PrivateKey: alicePriv, PublicKey: alicePub}
 
@@ -19,7 +18,6 @@ func TestRatchetLogic(t *testing.T) {
 
 	convID := [16]byte{0xAB, 0xCD}
 
-	// 2. Perform Handshake (Simulated)
 	// Alice -> Bob: Ephemeral Key
 	pkt, err := aliceMgr.PerformHandshake(convID, bobID.PublicKey)
 	if err != nil {
@@ -32,9 +30,7 @@ func TestRatchetLogic(t *testing.T) {
 	}
 
 	// Verify Roots match (implicitly, by checking if they can talk)
-	// Note: In real Double Ratchet, Alice's Send = Bob's Recv, and vice versa.
 
-	// 3. Test In-Order Communication (Alice -> Bob)
 	msgs := []string{"Hello", "World", "This", "Is", "Ratchet"}
 	encryptedPkts := make([]*common.Packet, len(msgs))
 
@@ -63,8 +59,6 @@ func TestRatchetLogic(t *testing.T) {
 	}
 	fmt.Println("In-Order Test Passed")
 
-	// 4. Test Out-of-Order Communication (Alice -> Bob)
-	// Messages: 5, 6, 7, 8, 9 (indices relative to session start, so actually 5..9)
 	moreMsgs := []string{"Msg5", "Msg6", "Msg7", "Msg8", "Msg9"}
 	oooPkts := make([]*common.Packet, len(moreMsgs))
 

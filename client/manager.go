@@ -3,6 +3,7 @@ package main
 import (
 	common "common"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -25,8 +26,7 @@ type ClientManager struct {
 	// PendingFiles tracks partial file transfers indexed by message ID.
 	PendingFiles map[[common.IDSize]byte]*FileAssembly
 	// PublicKeys caches user public keys.
-	PublicKeys map[[common.IDSize]byte][32]byte
-	// pendingRequests tracks in-flight public key requests.
+	PublicKeys      map[[common.IDSize]byte][32]byte
 	pendingRequests map[[common.IDSize]byte]chan struct{}
 	mu              sync.Mutex
 }
@@ -40,7 +40,7 @@ type ConversationInfo struct {
 }
 
 func NewClientManager(userID [common.IDSize]byte, username string) *ClientManager {
-	fmt.Printf("[DEBUG] NewClientManager called with UserID: %x\n", userID)
+	log.Printf("[DEBUG] NewClientManager called with UserID: %x\n", userID)
 	return &ClientManager{
 		UserID:          userID,
 		Username:        username,
@@ -61,7 +61,7 @@ func (m *ClientManager) RegisterConversation(id [common.IDSize]byte, name string
 		Admins:  make(map[[common.IDSize]byte]struct{}),
 		Members: make([][common.IDSize]byte, 0),
 	}
-	fmt.Printf("\n[INFO] Conversation registered: %s\n> ", name)
+	tuiPrintf("[INFO] Conversation registered: %s", name)
 }
 
 func (m *ClientManager) SetGroupAdmin(id [common.IDSize]byte, userID [common.IDSize]byte, isAdmin bool) {
@@ -73,8 +73,6 @@ func (m *ClientManager) SetGroupAdmin(id [common.IDSize]byte, userID [common.IDS
 		} else {
 			delete(info.Admins, userID)
 		}
-		// m.Conversations[id] = info is not strictly needed for maps, but good practice if info was value.
-		// Wait, info is a value type `ConversationInfo`, so the map Reference is copied. Yes it's needed!
 		m.Conversations[id] = info
 	}
 }
@@ -196,7 +194,7 @@ func (m *ClientManager) HandleFileMeta(msgID [common.IDSize]byte, meta common.Fi
 		ReceivedChunks: make(map[int32]bool),
 		Data:           make([]byte, meta.FileSize),
 	}
-	fmt.Printf("\n[INFO] Receiving file: %s (%d bytes)\n> ", meta.FileName, meta.FileSize)
+	tuiPrintf("[INFO] Receiving file: %s (%d bytes)", meta.FileName, meta.FileSize)
 }
 
 func (m *ClientManager) HandleFileChunk(msgID [common.IDSize]byte, chunk common.FileChunk) {
@@ -212,12 +210,17 @@ func (m *ClientManager) HandleFileChunk(msgID [common.IDSize]byte, chunk common.
 	offset := int64(chunk.ChunkNo) * StandardChunkSize
 
 	if offset+int64(len(chunk.ChunkData)) > int64(len(assembly.Data)) {
-		fmt.Printf("\n[WARNING] Received file chunk out of bounds. Dropping chunk.\n> ")
+		tuiPrintf("[WARNING] Received file chunk out of bounds. Dropping chunk.")
 		return
 	}
 
 	copy(assembly.Data[offset:], chunk.ChunkData)
 	assembly.ReceivedChunks[chunk.ChunkNo] = true
+
+	if program != nil {
+		percent := float64(len(assembly.ReceivedChunks)) / float64(assembly.Meta.TotalChunks)
+		go program.Send(ProgressMsg(percent))
+	}
 
 	if len(assembly.ReceivedChunks) == int(assembly.Meta.TotalChunks) {
 		m.finalizeFile(msgID, assembly)
@@ -235,9 +238,9 @@ func (m *ClientManager) finalizeFile(msgID [common.IDSize]byte, assembly *FileAs
 	}
 
 	if err := os.WriteFile(path, assembly.Data, 0644); err != nil {
-		fmt.Printf("\n[ERROR] Failed to save file: %v\n> ", err)
+		tuiPrintf("[ERROR] Failed to save file: %v", err)
 	} else {
-		fmt.Printf("\n[INFO] File saved: %s\n> ", path)
+		tuiPrintf("[INFO] File saved: %s", path)
 	}
 }
 

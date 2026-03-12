@@ -21,8 +21,7 @@ type Client struct {
 	Conn     net.Conn
 	UserID   [common.IDSize]byte
 	Username string
-	// mu protects concurrent writes to Conn
-	mu sync.Mutex
+	mu       sync.Mutex
 }
 
 type Conversation struct {
@@ -242,7 +241,6 @@ func (s *Server) handleGroupAdd(sender *Client, p common.Packet) {
 		},
 		Body: respBody,
 	}
-
 
 	syncBody := make([]byte, 0)
 	syncBody = append(syncBody, convID[:]...)
