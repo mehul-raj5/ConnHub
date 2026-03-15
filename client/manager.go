@@ -19,13 +19,13 @@ type FileAssembly struct {
 type ClientManager struct {
 	UserID   [common.IDSize]byte
 	Username string
-	// Conversations maps conversation IDs to their info.
+
 	Conversations map[[common.IDSize]byte]ConversationInfo
-	// Usernames maps user IDs to their display names.
+
 	Usernames map[[common.IDSize]byte]string
-	// PendingFiles tracks partial file transfers indexed by message ID.
+
 	PendingFiles map[[common.IDSize]byte]*FileAssembly
-	// PublicKeys caches user public keys.
+
 	PublicKeys      map[[common.IDSize]byte][32]byte
 	pendingRequests map[[common.IDSize]byte]chan struct{}
 	mu              sync.Mutex
@@ -244,7 +244,6 @@ func (m *ClientManager) finalizeFile(msgID [common.IDSize]byte, assembly *FileAs
 	}
 }
 
-// GetPublicKey returns the public key for a user.
 func (m *ClientManager) GetPublicKey(userID [common.IDSize]byte, fetchFunc func()) ([32]byte, error) {
 	m.mu.Lock()
 	if key, ok := m.PublicKeys[userID]; ok {

@@ -18,7 +18,6 @@ type Session struct {
 	SendCount uint32
 	RecvCount uint32
 
-	// Skipped Keys for out-of-order messages: Map[SeqNum]MessageKey
 	SkippedKeys map[uint32][32]byte
 
 	CreatedAt time.Time
@@ -58,7 +57,6 @@ func (sm *SessionManager) GetSession(convID [16]byte) (*Session, bool) {
 	return sess, ok
 }
 
-// SaveSession stores a new session with initialized chains.
 func (sm *SessionManager) SaveSession(convID [16]byte, sendKey, recvKey [32]byte) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()

@@ -13,7 +13,7 @@ type User struct {
 	ID          [common.IDSize]byte
 	Username    string
 	IdentityKey [32]byte
-	// OfflineQueue stores packets destined for this user while they were offline.
+
 	OfflineQueue []common.Packet
 }
 
@@ -128,7 +128,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 		},
 		Body: userID[:],
 	}
-	// Initial ACK doesn't need client mutex because we just created client
+
 	if err := ack.Encode(conn); err != nil {
 		return
 	}

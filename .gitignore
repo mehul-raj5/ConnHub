@@ -21,11 +21,14 @@
 # Compiled binaries
 client/client
 server/server
+client_bin
+server_bin
 bin/
 dist/
 
-# OS generated files
+# OS generated files and project metadata
 .DS_Store
+*.code-workspace
 /client/downloads/
 /client/data_received/
 /data/
@@ -34,6 +37,7 @@ dist/
 .gocache/
 .gomodcache/
 .gotmp/
+.cache/
 local_cache/
 local_tmp/
 tmp/

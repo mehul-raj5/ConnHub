@@ -39,7 +39,6 @@ type appModel struct {
 	isDownloading bool
 	err           error
 
-	// Track which conversation is currently active in StateChat
 	activeConv [16]byte
 
 	suggestions []string
@@ -75,10 +74,8 @@ func initialModel() appModel {
 	}
 }
 
-// Global program instance for dispatching incoming network messages
 var program *tea.Program
 
-// Update the TUI when a message is received from the network
 type NetworkMsg struct {
 	ConversationID [16]byte
 	SenderName     string
@@ -123,11 +120,20 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else if strings.HasPrefix(v, "/d") && !strings.HasPrefix(v, "/dm") {
 				m.textarea.SetValue("/dm ")
 				m.textarea.CursorEnd()
-			} else if strings.HasPrefix(v, "/a") && !strings.HasPrefix(v, "/add") {
+			} else if strings.HasPrefix(v, "/a") && !strings.HasPrefix(v, "/add") && !strings.HasPrefix(v, "/adm") {
 				m.textarea.SetValue("/add ")
+				m.textarea.CursorEnd()
+			} else if strings.HasPrefix(v, "/adm") && !strings.HasPrefix(v, "/admin") {
+				m.textarea.SetValue("/admin ")
 				m.textarea.CursorEnd()
 			} else if strings.HasPrefix(v, "/r") && !strings.HasPrefix(v, "/remove") {
 				m.textarea.SetValue("/remove ")
+				m.textarea.CursorEnd()
+			} else if strings.HasPrefix(v, "/remove_a") && !strings.HasPrefix(v, "/remove_admin") {
+				m.textarea.SetValue("/remove_admin ")
+				m.textarea.CursorEnd()
+			} else if strings.HasPrefix(v, "/le") && !strings.HasPrefix(v, "/leave") {
+				m.textarea.SetValue("/leave")
 				m.textarea.CursorEnd()
 			} else if strings.HasPrefix(v, "/f") && !strings.HasPrefix(v, "/file") {
 				m.textarea.SetValue("/file ")
@@ -148,7 +154,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if strings.HasPrefix(v, "/") {
 					handleSlashCommand(v, &m)
 				} else if m.state == StateChat {
-					// Add user's own message immediately
+
 					timestamp := time.Now().Format("03:04 PM")
 					timePrefix := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(fmt.Sprintf("[%s]", timestamp))
 					youPrefix := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true).Render("You:")
@@ -156,7 +162,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					formattedLine := fmt.Sprintf("%s %s %s", timePrefix, youPrefix, v)
 					m.chatHistory[m.activeConv] = append(m.chatHistory[m.activeConv], formattedLine)
 					m.viewport.SetContent(strings.Join(m.chatHistory[m.activeConv], "\n"))
-					// Send via the existing network logic
+
 					if m.activeConv != [16]byte{} {
 						go sendTextBubbleTea(m.activeConv, v)
 					} else {
@@ -198,8 +204,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			} else if cmd == "/dm" {
 				m.paramHint = "<username>"
-			} else if cmd == "/add" || cmd == "/remove" {
+			} else if cmd == "/add" || cmd == "/remove" || cmd == "/admin" || cmd == "/remove_admin" {
 				m.paramHint = "<username>"
+			} else if cmd == "/leave" {
+				m.paramHint = ""
 			} else if cmd == "/file" {
 				m.paramHint = "<path>"
 			}
@@ -209,7 +217,6 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 
-		// Calculate 20/55/25 split for Sidebar / Chat / System
 		sideWidth := int(float32(msg.Width) * 0.20)
 		chatWidth := int(float32(msg.Width) * 0.55)
 		sysWidth := msg.Width - sideWidth - chatWidth - 6
@@ -246,7 +253,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.viewport.SetContent(strings.Join(m.chatHistory[m.activeConv], "\n"))
 				m.viewport.GotoBottom()
 			} else {
-				// Increment unread and notify
+
 				m.unreadCounts[msg.ConversationID]++
 				updateSidebar(&m)
 
@@ -377,7 +384,6 @@ func (m appModel) View() string {
 	)
 }
 
-// Wrapper to dispatch sendText without prompting stdin
 func sendTextBubbleTea(convID [16]byte, text string) {
 	pkt := common.Packet{
 		Header: common.Header{
@@ -415,7 +421,6 @@ func sendTextBubbleTea(convID [16]byte, text string) {
 	sendPacket(&pkt)
 }
 
-// TUI printing helpers substituted into codebase by refactor script
 func tuiPrintf(format string, a ...any) {
 	if program != nil {
 		go program.Send(NetworkMsg{IsSystemMeta: true, Content: fmt.Sprintf(format, a...)})
@@ -450,7 +455,7 @@ func handleSlashCommand(input string, m *appModel) {
 
 	switch cmd {
 	case "help":
-		tuiPrintln("Commands:\n/help - Show this message\n/list - List conversations\n/chat <number> - Switch active chat\n/group <name> <user1,user2> - Create group\n/dm <username> - Start private chat\n/add <username> - Add user to current group\n/remove <username> - Remove user from group\n/file <path> - Send file to current chat")
+		tuiPrintln("Commands:\n/help - Show this message\n/list - List conversations\n/chat <number> - Switch active chat\n/group <name> <user1,user2> - Create group\n/dm <username> - Start private chat\n/add <username> - Add user to current group\n/remove <username> - Remove user from group\n/admin <username> - Make user admin\n/remove_admin <username> - Remove admin\n/leave - Leave current group\n/file <path> - Send file to current chat")
 	case "list":
 		listConversations()
 	case "chat":
@@ -473,7 +478,6 @@ func handleSlashCommand(input string, m *appModel) {
 				m.activeConv = convID
 				m.state = StateChat
 
-				// Clear unread counts for this chat
 				m.unreadCounts[convID] = 0
 				updateSidebar(m)
 
@@ -513,6 +517,24 @@ func handleSlashCommand(input string, m *appModel) {
 			removeMember(m.activeConv, args)
 		} else {
 			tuiPrintln("Usage: /remove <username> (Requires active group)")
+		}
+	case "admin":
+		if m.activeConv != [16]byte{} && args != "" {
+			makeGroupAdmin(m.activeConv, args)
+		} else {
+			tuiPrintln("Usage: /admin <username> (Requires active group)")
+		}
+	case "remove_admin":
+		if m.activeConv != [16]byte{} && args != "" {
+			removeGroupAdmin(m.activeConv, args)
+		} else {
+			tuiPrintln("Usage: /remove_admin <username> (Requires active group)")
+		}
+	case "leave":
+		if m.activeConv != [16]byte{} {
+			leaveGroup(m.activeConv)
+		} else {
+			tuiPrintln("Usage: /leave (Requires active group)")
 		}
 	case "file":
 		if m.activeConv != [16]byte{} && args != "" {

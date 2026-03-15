@@ -571,6 +571,29 @@ func removeGroupAdmin(convID [16]byte, username string) {
 	tuiPrintln("Remove admin request sent.")
 }
 
+func leaveGroup(convID [16]byte) {
+	if !mgr.IsGroup(convID) {
+		tuiPrintln("Error: This is not a group.")
+		return
+	}
+
+	username := mgr.Username
+	body := make([]byte, 0)
+	body = append(body, convID[:]...)
+	body = append(body, byte(len(username)))
+	body = append(body, []byte(username)...)
+
+	pkt := common.Packet{
+		Header: common.Header{
+			MsgType: common.CtrlGroupRemove,
+			BodyLen: uint32(len(body)),
+		},
+		Body: body,
+	}
+	sendPacket(&pkt)
+	tuiPrintln("Leave group request sent.")
+}
+
 func sendFile(convID [16]byte, path string) {
 	if path == "" {
 		return

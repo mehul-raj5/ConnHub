@@ -11,7 +11,6 @@ import (
 
 const KeyFileName = "identity.key"
 
-// IdentityManager handles the client's long-term identity keys.
 type IdentityManager struct {
 	PrivateKey [32]byte
 	PublicKey  [32]byte

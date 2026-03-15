@@ -17,7 +17,6 @@ const (
 	NonceSize = 24
 )
 
-// GenerateIdentityKeys generates a long-term Identity Key Pair (X25519).
 func GenerateIdentityKeys() (private, public [KeySize]byte, err error) {
 	return generateKeyPair()
 }
@@ -31,7 +30,6 @@ func generateKeyPair() (private, public [KeySize]byte, err error) {
 		return private, public, err
 	}
 
-	// Clamp the private key (RFC 7748)
 	private[0] &= 248
 	private[31] &= 127
 	private[31] |= 64

@@ -18,18 +18,14 @@ func TestRatchetLogic(t *testing.T) {
 
 	convID := [16]byte{0xAB, 0xCD}
 
-	// Alice -> Bob: Ephemeral Key
 	pkt, err := aliceMgr.PerformHandshake(convID, bobID.PublicKey)
 	if err != nil {
 		t.Fatalf("Alice Handshake Init failed: %v", err)
 	}
 
-	// Bob receives Handshake
 	if err := bobMgr.HandleHandshake(*pkt); err != nil {
 		t.Fatalf("Bob Handle Handshake failed: %v", err)
 	}
-
-	// Verify Roots match (implicitly, by checking if they can talk)
 
 	msgs := []string{"Hello", "World", "This", "Is", "Ratchet"}
 	encryptedPkts := make([]*common.Packet, len(msgs))
@@ -74,18 +70,13 @@ func TestRatchetLogic(t *testing.T) {
 			t.Fatalf("Encrypt failed for OOO msg %d: %v", i, err)
 		}
 		oooPkts[i] = pkt
-		// Only after encrypt does the body contain the ciphertext
+
 	}
 
-	// Deliver Order: 7, 9, 5, 6, 8 (Indices: 2, 4, 0, 1, 3)
 	order := []int{2, 4, 0, 1, 3}
 
 	for _, idx := range order {
 		pkt := oooPkts[idx]
-		// We encounter a "FlagEncrypted must be set" check potentially
-		// Note that DecryptPacket strips the flag.
-		// So we must be careful if we reuse pointers?
-		// Here test reuses the pointer, but it's fine because we decrypt once per packet.
 
 		fmt.Printf("Bob receiving message index %d (SeqNum should be %d)...\n", 5+idx, 5+idx)
 		err := bobMgr.DecryptPacket(pkt)
