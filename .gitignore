@@ -23,6 +23,8 @@ client/client
 server/server
 client_bin
 server_bin
+client/Clients
+server/Servers
 bin/
 dist/
 
