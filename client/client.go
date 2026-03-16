@@ -199,8 +199,7 @@ func readLoop() {
 			mgr.RegisterConversation(convID, "Private Chat", false)
 
 			if _, ok := sessionMgr.GetSession(convID); ok {
-				tuiPrintf("[INFO] Session already exists for %x, skipping handshake.", convID[:4])
-				continue
+				tuiPrintf("[INFO] Overwriting stale session for %x.", convID[:4])
 			}
 
 			tuiPrintln("[INFO] Key Exchange Initiating...")
@@ -222,6 +221,10 @@ func readLoop() {
 			senderName := string(pkt.Body[48:])
 			mgr.AddUser(pkt.Header.SenderID, senderName)
 			mgr.RegisterConversation(pkt.Header.ConversationID, "Private Chat: "+senderName, false)
+
+			if _, ok := sessionMgr.GetSession(convID); ok {
+				tuiPrintf("[INFO] Clearing stale session for %x.", convID[:4])
+			}
 
 			tuiPrintf("[INFO] Private Chat requested by %s. Waiting for Handshake...", senderName)
 

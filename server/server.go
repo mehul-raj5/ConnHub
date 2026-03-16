@@ -3,6 +3,7 @@ package main
 import (
 	common "common"
 	"crypto/rand"
+	"errors"
 	"io"
 	"log"
 	"net"
@@ -112,7 +113,19 @@ func (s *Server) handleConnection(conn net.Conn) {
 	username := string(p.Body[32:])
 	log.Printf("Login: %s", username)
 
-	userID := s.getOrCreateUser(username, pubKey)
+	userID, err := s.authenticateUser(username, pubKey)
+	if err != nil {
+		log.Printf("Login rejected for %s: %v", username, err)
+		errPkt := common.Packet{
+			Header: common.Header{
+				MsgType: common.CtrlError,
+				BodyLen: 0,
+			},
+		}
+		errPkt.Encode(conn)
+		return
+	}
+
 	client := &Client{
 		Conn:     conn,
 		UserID:   userID,
@@ -332,7 +345,10 @@ func (s *Server) handleGroupRemove(sender *Client, p common.Packet) {
 		return
 	}
 	targetName := string(p.Body[offset : offset+uLen])
-	targetID := s.getOrCreateUser(targetName, [32]byte{})
+	targetID, ok := s.getUserIDByName(targetName)
+	if !ok {
+		return
+	}
 
 	if targetID == conv.Creator {
 		log.Printf("[WARNING] Cannot remove creator from group")
@@ -407,7 +423,10 @@ func (s *Server) handleGroupMakeAdmin(sender *Client, p common.Packet) {
 		return
 	}
 	targetName := string(p.Body[offset : offset+uLen])
-	targetID := s.getOrCreateUser(targetName, [32]byte{})
+	targetID, ok := s.getUserIDByName(targetName)
+	if !ok {
+		return
+	}
 
 	s.mu.Lock()
 	if !conv.HasMember(targetID) {
@@ -468,7 +487,10 @@ func (s *Server) handleGroupRemoveAdmin(sender *Client, p common.Packet) {
 		return
 	}
 	targetName := string(p.Body[offset : offset+uLen])
-	targetID := s.getOrCreateUser(targetName, [32]byte{})
+	targetID, ok := s.getUserIDByName(targetName)
+	if !ok {
+		return
+	}
 
 	if targetID == conv.Creator {
 		log.Printf("[WARNING] Cannot demote creator from admins")
@@ -765,7 +787,7 @@ func (s *Server) flushOfflineQueue(userID [common.IDSize]byte, conn net.Conn) {
 	}
 }
 
-func (s *Server) getOrCreateUser(username string, pubKey [32]byte) [common.IDSize]byte {
+func (s *Server) authenticateUser(username string, pubKey [32]byte) ([common.IDSize]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -774,10 +796,10 @@ func (s *Server) getOrCreateUser(username string, pubKey [32]byte) [common.IDSiz
 	if id, ok := s.usernames[username]; ok {
 		if u, exists := s.users[id]; exists {
 			if pubKey != zero && u.IdentityKey != pubKey {
-				u.IdentityKey = pubKey
+				return [common.IDSize]byte{}, errors.New("username already taken")
 			}
 		}
-		return id
+		return id, nil
 	}
 
 	id := genID()
@@ -788,11 +810,23 @@ func (s *Server) getOrCreateUser(username string, pubKey [32]byte) [common.IDSiz
 		IdentityKey:  pubKey,
 		OfflineQueue: make([]common.Packet, 0),
 	}
-	return id
+	return id, nil
+}
+
+func (s *Server) getUserIDByName(username string) ([common.IDSize]byte, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	id, ok := s.usernames[username]
+	return id, ok
 }
 
 func (s *Server) addConnection(conn net.Conn, client *Client) {
 	s.mu.Lock()
+	if oldClient, ok := s.clients[client.UserID]; ok {
+		// Close the old connection to prevent ghost sessions
+		oldClient.Conn.Close()
+		delete(s.conns, oldClient.Conn)
+	}
 	s.clients[client.UserID] = client
 	s.conns[conn] = client
 	s.mu.Unlock()
@@ -802,7 +836,11 @@ func (s *Server) removeConnection(conn net.Conn) {
 	s.mu.Lock()
 	if client, ok := s.conns[conn]; ok {
 		delete(s.conns, conn)
-		delete(s.clients, client.UserID)
+		// Only delete from clients map if this connection is the currently active one
+		// otherwise, we might be deleting a newly established connection (if old conn just closed)
+		if activeClient, isClientOk := s.clients[client.UserID]; isClientOk && activeClient.Conn == conn {
+			delete(s.clients, client.UserID)
+		}
 	}
 	s.mu.Unlock()
 }
