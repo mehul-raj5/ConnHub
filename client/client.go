@@ -122,16 +122,18 @@ func readLoop() {
 			os.Exit(1)
 		}
 
-		if pkt.Header.Flags&common.FlagEncrypted != 0 {
+	if pkt.Header.Flags&common.FlagEncrypted != 0 {
 			if mgr.IsGroup(pkt.Header.ConversationID) {
 				if err := sessionMgr.DecryptGroupPacket(&pkt); err != nil {
 					log.Printf("[ERROR] Group Decrypt failed: %v", err)
 					continue
 				}
-				if sess, ok := sessionMgr.GetGroupSession(pkt.Header.ConversationID); ok {
-					sess.IncrementCounter()
-					if sess.ShouldRotate() && mgr.IsGroupAdmin(pkt.Header.ConversationID) {
-						go rotateGroupKey(pkt.Header.ConversationID)
+				if pkt.Header.MsgType != common.MsgFileChunk {
+					if sess, ok := sessionMgr.GetGroupSession(pkt.Header.ConversationID); ok {
+						sess.IncrementCounter()
+						if sess.ShouldRotate() && mgr.IsGroupAdmin(pkt.Header.ConversationID) {
+							go rotateGroupKey(pkt.Header.ConversationID)
+						}
 					}
 				}
 			} else {
