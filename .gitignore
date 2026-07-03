@@ -1,0 +1,46 @@
+# Ignore everything by default
+/*
+
+# Except these core directories and files
+!/client/
+!/server/
+!/common/
+!/README.md
+!/.gitignore
+!/go.work
+!/go.work.sum
+!/build_clients.sh
+
+# General exclusions
+*.key
+*.log
+*.exe
+*.out
+*.app
+*_test.go
+
+# Compiled binaries
+client/client
+server/server
+client_bin
+server_bin
+client/Clients
+server/Servers
+bin/
+dist/
+
+# OS generated files and project metadata
+.DS_Store
+*.code-workspace
+/client/downloads/
+/client/data_received/
+/data/
+
+# Go workspaces and caches
+.gocache/
+.gomodcache/
+.gotmp/
+.cache/
+local_cache/
+local_tmp/
+tmp/
