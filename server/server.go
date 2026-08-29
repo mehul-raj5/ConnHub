@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 )
 
 type User struct {
@@ -21,17 +22,61 @@ type User struct {
 	OfflineQueue []common.Packet
 }
 
+// sendBufferSize bounds how far a recipient may fall behind before the server
+// treats it as a stalled consumer. writeTimeout bounds a single socket write so
+// a wedged peer cannot park the write loop forever.
+const (
+	sendBufferSize  = 128
+	writeTimeout    = 10 * time.Second
+	maxOfflineQueue = 512
+)
+
+// Client owns one connection. Exactly one goroutine (writeLoop) ever writes to
+// Conn, so packets are framed in order and no write lock is needed. Producers
+// hand packets over via enqueue, which never blocks.
 type Client struct {
 	Conn     net.Conn
 	UserID   [common.IDSize]byte
 	Username string
-	mu       sync.Mutex
+
+	send      chan common.Packet
+	done      chan struct{}
+	sendMu    sync.Mutex // guards closed; never held across I/O
+	closed    bool
+	closeOnce sync.Once
+}
+
+// enqueue queues p for delivery. It reports false if the connection is closing
+// or the peer has fallen sendBufferSize packets behind.
+func (c *Client) enqueue(p common.Packet) bool {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if c.closed {
+		return false
+	}
+	select {
+	case c.send <- p:
+		return true
+	default:
+		return false
+	}
+}
+
+// close tears the connection down. Marking closed under sendMu before closing
+// done guarantees no enqueue can land after a spill has drained the channel.
+func (c *Client) close() {
+	c.closeOnce.Do(func() {
+		c.sendMu.Lock()
+		c.closed = true
+		c.sendMu.Unlock()
+		close(c.done)
+		c.Conn.Close()
+	})
 }
 
 type Conversation struct {
 	ID      [common.IDSize]byte
 	Name    string
-	Creator [common.IDSize]byte
 	Admins  map[[common.IDSize]byte]struct{}
 	Members [][common.IDSize]byte
 	IsGroup bool
@@ -134,9 +179,10 @@ func (s *Server) handleConnection(conn net.Conn) {
 		Conn:     conn,
 		UserID:   userID,
 		Username: username,
+		send:     make(chan common.Packet, sendBufferSize),
+		done:     make(chan struct{}),
 	}
-
-	s.addConnection(conn, client)
+	defer client.close()
 
 	ack := common.Packet{
 		Header: common.Header{
@@ -146,11 +192,14 @@ func (s *Server) handleConnection(conn net.Conn) {
 		Body: userID[:],
 	}
 
+	// Written inline: the write loop has not started and the client is not yet
+	// registered, so nothing else can be writing to this socket.
 	if err := ack.Encode(conn); err != nil {
 		return
 	}
 
-	s.flushOfflineQueue(userID, conn)
+	s.addConnection(conn, client)
+	go s.writeLoop(client)
 
 	for {
 		p, err := common.Decode(conn)
@@ -339,10 +388,11 @@ func (s *Server) handleGroupRemove(sender *Client, p common.Packet) {
 		return
 	}
 	_, isAdmin := conv.Admins[sender.UserID]
+	isMember := conv.HasMember(sender.UserID)
 	s.mu.RUnlock()
 
-	if !isAdmin {
-		log.Printf("[WARNING] Unauthorized CtrlGroupRemove from %x for group %x", sender.UserID[:4], convID[:4])
+	if !isMember {
+		log.Printf("[WARNING] CtrlGroupRemove from non-member %x for group %x", sender.UserID[:4], convID[:4])
 		return
 	}
 
@@ -358,8 +408,12 @@ func (s *Server) handleGroupRemove(sender *Client, p common.Packet) {
 		return
 	}
 
-	if targetID == conv.Creator {
-		log.Printf("[WARNING] Cannot remove creator from group")
+	// The initiator is sender.UserID, which the server stamps on every packet,
+	// so it cannot be spoofed by the client. A member may always remove
+	// themselves (leaving the group); removing anyone else requires admin.
+	if targetID != sender.UserID && !isAdmin {
+		log.Printf("[WARNING] Unauthorized CtrlGroupRemove from %x targeting %x in group %x",
+			sender.UserID[:4], targetID[:4], convID[:4])
 		return
 	}
 
@@ -500,12 +554,18 @@ func (s *Server) handleGroupRemoveAdmin(sender *Client, p common.Packet) {
 		return
 	}
 
-	if targetID == conv.Creator {
-		log.Printf("[WARNING] Cannot demote creator from admins")
+	// Checked and mutated in one critical section so two concurrent demotions
+	// cannot both pass the last-admin guard and leave the group unmanageable.
+	s.mu.Lock()
+	if _, isTargetAdmin := conv.Admins[targetID]; !isTargetAdmin {
+		s.mu.Unlock()
 		return
 	}
-
-	s.mu.Lock()
+	if len(conv.Admins) <= 1 {
+		s.mu.Unlock()
+		log.Printf("[WARNING] Refusing to demote %x: last admin of group %x", targetID[:4], convID[:4])
+		return
+	}
 	delete(conv.Admins, targetID)
 	s.mu.Unlock()
 
@@ -535,6 +595,12 @@ func (s *Server) handleGroupRemoveAdmin(sender *Client, p common.Packet) {
 func (s *Server) handleData(sender *Client, p common.Packet) {
 	s.mu.RLock()
 	conv, ok := s.convs[p.Header.ConversationID]
+	var isMember bool
+	var members [][common.IDSize]byte
+	if ok {
+		members = append(members, conv.Members...)
+		isMember = conv.HasMember(sender.UserID)
+	}
 	s.mu.RUnlock()
 
 	if !ok {
@@ -542,11 +608,18 @@ func (s *Server) handleData(sender *Client, p common.Packet) {
 		return
 	}
 
-	for _, memberID := range conv.Members {
+	if !isMember {
+		log.Printf("[WARNING] handleData: non-member %x sent to conv %x", sender.UserID[:4], p.Header.ConversationID[:4])
+		return
+	}
+
+	// members is a snapshot taken under the read lock; enqueue never blocks, so
+	// the fan-out runs inline rather than spawning a goroutine per recipient.
+	for _, memberID := range members {
 		if memberID == sender.UserID {
 			continue
 		}
-		go s.sendPacket(memberID, p)
+		s.sendPacket(memberID, p)
 	}
 }
 
@@ -601,7 +674,6 @@ func (s *Server) handleGroupCreate(sender *Client, p common.Packet) {
 	conv := &Conversation{
 		ID:      convID,
 		Name:    groupName,
-		Creator: sender.UserID,
 		IsGroup: true,
 		Admins:  make(map[[common.IDSize]byte]struct{}),
 		Members: make([][common.IDSize]byte, 0),
@@ -844,42 +916,105 @@ func (s *Server) handleDownloadRq(sender *Client, p common.Packet) {
 	s.sendPacket(sender.UserID, mediaAck(common.CtrlDownloadAck, p, body))
 }
 
-func (s *Server) sendPacket(userID [common.IDSize]byte, p common.Packet) {
-	s.mu.Lock()
-	client, ok := s.clients[userID]
-	s.mu.Unlock()
+// writeLoop is the sole writer for one connection. It first drains whatever
+// accumulated while the user was offline, then serves live traffic. On any
+// write failure it tears the connection down and spills the backlog back onto
+// the offline queue so nothing is silently dropped.
+func (s *Server) writeLoop(c *Client) {
+	defer func() {
+		c.close()
+		s.spill(c)
+	}()
 
-	if ok {
-		client.mu.Lock()
-		defer client.mu.Unlock()
+	for _, p := range s.takeOfflineQueue(c.UserID) {
+		if !s.writePacket(c, p) {
+			return
+		}
+	}
 
-		if err := p.Encode(client.Conn); err != nil {
-			log.Printf("Send error to %x: %v", userID, err)
+	for {
+		select {
+		case p := <-c.send:
+			if !s.writePacket(c, p) {
+				return
+			}
+		case <-c.done:
+			return
 		}
-	} else {
-		s.mu.Lock()
-		user, exists := s.users[userID]
-		if exists {
-			user.OfflineQueue = append(user.OfflineQueue, p)
-		}
-		s.mu.Unlock()
 	}
 }
 
-func (s *Server) flushOfflineQueue(userID [common.IDSize]byte, conn net.Conn) {
+// writePacket performs one bounded socket write. A false return means the
+// connection is finished.
+func (s *Server) writePacket(c *Client, p common.Packet) bool {
+	c.Conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	if err := p.Encode(c.Conn); err != nil {
+		log.Printf("[WARNING] Write to %s (%x) failed: %v", c.Username, c.UserID[:4], err)
+		s.queueOffline(c.UserID, p)
+		return false
+	}
+	return true
+}
+
+// spill moves anything still queued for a dead connection onto the offline
+// queue. Safe because close() marks the client closed before this runs, so no
+// further enqueue can succeed.
+func (s *Server) spill(c *Client) {
+	for {
+		select {
+		case p := <-c.send:
+			s.queueOffline(c.UserID, p)
+		default:
+			return
+		}
+	}
+}
+
+// queueOffline stores a packet for later delivery, capped at maxOfflineQueue
+// packets per user; the oldest are discarded first.
+func (s *Server) queueOffline(userID [common.IDSize]byte, p common.Packet) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	user, ok := s.users[userID]
+	if !ok {
+		return
+	}
+	if len(user.OfflineQueue) >= maxOfflineQueue {
+		drop := len(user.OfflineQueue) - maxOfflineQueue + 1
+		log.Printf("[WARNING] Offline queue full for %x, dropping %d oldest", userID[:4], drop)
+		user.OfflineQueue = append(user.OfflineQueue[:0], user.OfflineQueue[drop:]...)
+	}
+	user.OfflineQueue = append(user.OfflineQueue, p)
+}
+
+func (s *Server) sendPacket(userID [common.IDSize]byte, p common.Packet) {
+	s.mu.RLock()
+	client, ok := s.clients[userID]
+	s.mu.RUnlock()
+
+	if !ok {
+		s.queueOffline(userID, p)
+		return
+	}
+
+	if !client.enqueue(p) {
+		log.Printf("[WARNING] %s (%x) is not keeping up; disconnecting", client.Username, userID[:4])
+		client.close() // its writeLoop spills the rest
+		s.queueOffline(userID, p)
+	}
+}
+
+// takeOfflineQueue atomically removes and returns a user's queued packets.
+func (s *Server) takeOfflineQueue(userID [common.IDSize]byte) []common.Packet {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	user, ok := s.users[userID]
 	if !ok || len(user.OfflineQueue) == 0 {
-		s.mu.Unlock()
-		return
+		return nil
 	}
 	queue := user.OfflineQueue
 	user.OfflineQueue = nil
-	s.mu.Unlock()
-
-	for _, p := range queue {
-		p.Encode(conn)
-	}
+	return queue
 }
 
 func (s *Server) authenticateUser(username string, pubKey [32]byte) ([common.IDSize]byte, error) {
@@ -890,6 +1025,9 @@ func (s *Server) authenticateUser(username string, pubKey [32]byte) ([common.IDS
 
 	if id, ok := s.usernames[username]; ok {
 		if u, exists := s.users[id]; exists {
+			if pubKey == zero {
+				return [common.IDSize]byte{}, errors.New("not allowed")
+			}
 			if pubKey != zero && u.IdentityKey != pubKey {
 				return [common.IDSize]byte{}, errors.New("username already taken")
 			}
@@ -919,7 +1057,7 @@ func (s *Server) addConnection(conn net.Conn, client *Client) {
 	s.mu.Lock()
 	if oldClient, ok := s.clients[client.UserID]; ok {
 		// Close the old connection to prevent ghost sessions
-		oldClient.Conn.Close()
+		oldClient.close()
 		delete(s.conns, oldClient.Conn)
 	}
 	s.clients[client.UserID] = client

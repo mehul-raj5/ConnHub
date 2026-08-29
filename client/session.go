@@ -228,6 +228,14 @@ func (sm *SessionManager) GetGroupSession(groupID [16]byte) (*GroupSession, bool
 	return sess, ok
 }
 
+// DeleteGroupSession discards all key material for a group the user has left,
+// so a stale key cannot decrypt anything relayed afterwards.
+func (sm *SessionManager) DeleteGroupSession(groupID [16]byte) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	delete(sm.groupSessions, groupID)
+}
+
 func (sm *SessionManager) CreateGroupSession(groupID [16]byte, key [32]byte, version uint32, isAdmin bool) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
