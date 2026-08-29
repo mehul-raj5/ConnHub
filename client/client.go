@@ -322,6 +322,15 @@ func readLoop() {
 
 			uName := mgr.GetUsername(userID)
 			groupName := mgr.GetConversationName(convID)
+
+			if userID == mgr.UserID {
+				// We left, or were removed: forget the group and its keys.
+				mgr.RemoveConversation(convID)
+				sessionMgr.DeleteGroupSession(convID)
+				tuiPrintf("[INFO] You are no longer a member of %s", groupName)
+				continue
+			}
+
 			mgr.RemoveMemberFromGroup(convID, userID)
 			tuiPrintf("[INFO] User %s removed from group %s", uName, groupName)
 

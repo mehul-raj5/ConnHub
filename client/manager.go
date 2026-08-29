@@ -29,7 +29,6 @@ type ClientManager struct {
 type ConversationInfo struct {
 	Name    string
 	IsGroup bool
-	Creator [common.IDSize]byte
 	Admins  map[[common.IDSize]byte]struct{}
 	Members [][common.IDSize]byte
 }
@@ -195,15 +194,12 @@ func (m *ClientManager) IsUserAdmin(groupID [common.IDSize]byte, userID [common.
 	return false
 }
 
-func (m *ClientManager) IsGroupCreator(groupID [common.IDSize]byte, userID [common.IDSize]byte) bool {
+// RemoveConversation forgets a conversation entirely. Used when the local user
+// leaves or is removed from a group.
+func (m *ClientManager) RemoveConversation(id [common.IDSize]byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if info, ok := m.Conversations[groupID]; ok {
-		if len(info.Members) > 0 {
-			return info.Members[0] == userID
-		}
-	}
-	return false
+	delete(m.Conversations, id)
 }
 
 func (m *ClientManager) GetPublicKey(userID [common.IDSize]byte, fetchFunc func()) ([32]byte, error) {
