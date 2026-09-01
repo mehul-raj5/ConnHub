@@ -11,37 +11,38 @@ const IDSize = 16
 const HeaderSize = 16 + 16 + 16 + 1 + 2 + 4
 
 const (
-	MsgControl   uint8 = 0x00
 	MsgText      uint8 = 0x01
 	MsgMediaMeta uint8 = 0x04 // E2E-encrypted media metadata envelope (Supabase direct-upload)
 
-	CtrlLogin             uint8 = 0x10
-	CtrlLoginAck          uint8 = 0x11
-	CtrlGroupCreate       uint8 = 0x12
-	CtrlGroupAdd          uint8 = 0x13
-	CtrlGroupRemove       uint8 = 0x14
-	CtrlDirectInit        uint8 = 0x15
-	CtrlDirectAck         uint8 = 0x16
-	CtrlGroupKeyUpdate    uint8 = 0x17
-	CtrlGroupMakeAdmin    uint8 = 0x1B
-	CtrlGroupRemoveAdmin  uint8 = 0x1C
-	CtrlGroupKeyUpdateAck uint8 = 0x1A
-	CtrlPubRq             uint8 = 0x18
-	CtrlPubAck            uint8 = 0x19
+	CtrlLogin            uint8 = 0x10
+	CtrlLoginAck         uint8 = 0x11
+	CtrlGroupCreate      uint8 = 0x12
+	CtrlGroupAdd         uint8 = 0x13
+	CtrlGroupRemove      uint8 = 0x14
+	CtrlDirectInit       uint8 = 0x15
+	CtrlDirectAck        uint8 = 0x16
+	CtrlGroupMakeAdmin   uint8 = 0x1B
+	CtrlGroupRemoveAdmin uint8 = 0x1C
+	// Sender-key group messaging: every member generates their own sending
+	// chain and hands it to each other member over the 1-1 channel they share,
+	// so a CtrlSenderKey packet is always carried inside an encrypted unicast.
+	CtrlSenderKey uint8 = 0x1D
+
+	// Conversation lookup. A client that receives traffic for a conversation it
+	// has never heard of asks the server who is in it; the server answers only
+	// if the asker is a member.
+	CtrlConvInfoRq  uint8 = 0x1E // client -> server: body is convID
+	CtrlConvInfoAck uint8 = 0x1F // server -> client: body is an encoded ConvInfo
 
 	// Media direct-upload signed-URL exchange (client <-> chat server).
-	CtrlUploadRq   uint8 = 0x20 // client -> server: request a signed upload URL
-	CtrlUploadAck  uint8 = 0x21 // server -> client: signed upload URL + object path
-	CtrlDownloadRq uint8 = 0x22 // client -> server: request a signed download URL
+	CtrlUploadRq    uint8 = 0x20 // client -> server: request a signed upload URL
+	CtrlUploadAck   uint8 = 0x21 // server -> client: signed upload URL + object path
+	CtrlDownloadRq  uint8 = 0x22 // client -> server: request a signed download URL
 	CtrlDownloadAck uint8 = 0x23 // server -> client: signed download URL
 
 	CtrlError uint8 = 0xFF
 
-	FlagNone      uint16 = 0
 	FlagEncrypted uint16 = 1 << 0
-	FlagHandshake uint16 = 1 << 1
-	FlagAck       uint16 = 1 << 2
-	FlagInit      uint16 = 1 << 3
 )
 
 type Header struct {
@@ -223,6 +224,151 @@ func DecodeMediaMetadata(data []byte) (MediaMetadata, error) {
 	copy(m.Thumbnail, data[offset:offset+thumbLen])
 
 	return m, nil
+}
+
+// --- Sender-key distribution ---
+
+// SenderKeyPayload is the body of a CtrlSenderKey packet: one member's sending
+// chain key for one group, at one epoch. Every membership change bumps the
+// epoch and every member redistributes, so a receiver can tell a fresh key from
+// a replayed older one.
+type SenderKeyPayload struct {
+	GroupID  [IDSize]byte
+	Epoch    uint32
+	ChainKey [32]byte
+}
+
+const senderKeyLen = IDSize + 4 + 32
+
+func (s *SenderKeyPayload) Encode() []byte {
+	buf := make([]byte, senderKeyLen)
+	copy(buf[0:IDSize], s.GroupID[:])
+	binary.BigEndian.PutUint32(buf[IDSize:], s.Epoch)
+	copy(buf[IDSize+4:], s.ChainKey[:])
+	return buf
+}
+
+func DecodeSenderKey(data []byte) (SenderKeyPayload, error) {
+	var s SenderKeyPayload
+	if len(data) < senderKeyLen {
+		return s, fmt.Errorf("sender key payload too short: %d", len(data))
+	}
+	copy(s.GroupID[:], data[0:IDSize])
+	s.Epoch = binary.BigEndian.Uint32(data[IDSize:])
+	copy(s.ChainKey[:], data[IDSize+4:])
+	return s, nil
+}
+
+// --- Conversation lookup ---
+
+// ConvMember is one participant in a ConvInfo roster.
+type ConvMember struct {
+	UserID [IDSize]byte
+	PubKey [32]byte
+	Name   string
+}
+
+// memberMinSize is what one member occupies on the wire with an empty name.
+const memberMinSize = IDSize + 32 + 2
+
+// ConvInfo is the body of a CtrlConvInfoAck: everything a client needs to take
+// part in a conversation it has just heard of for the first time. Carrying the
+// identity key of every member means direct sessions can be derived on the spot
+// rather than costing a lookup each.
+type ConvInfo struct {
+	ConvID [IDSize]byte
+
+	IsGroup bool
+
+	// Name is the group's name, and empty for a direct conversation, which the
+	// client titles after the peer instead. Without it, a group first learned
+	// about through this lookup would have nothing to display but its ID.
+	Name string
+
+	Members []ConvMember
+}
+
+func (c *ConvInfo) Encode() []byte {
+	size := IDSize + 1 + 2 + len(c.Name) + 2
+	for _, m := range c.Members {
+		size += memberMinSize + len(m.Name)
+	}
+	buf := make([]byte, size)
+
+	offset := 0
+	copy(buf[offset:], c.ConvID[:])
+	offset += IDSize
+
+	if c.IsGroup {
+		buf[offset] = 1
+	}
+	offset++
+
+	offset += putString(buf[offset:], c.Name)
+
+	binary.BigEndian.PutUint16(buf[offset:], uint16(len(c.Members)))
+	offset += 2
+
+	for _, m := range c.Members {
+		copy(buf[offset:], m.UserID[:])
+		offset += IDSize
+		copy(buf[offset:], m.PubKey[:])
+		offset += 32
+		offset += putString(buf[offset:], m.Name)
+	}
+	return buf
+}
+
+func DecodeConvInfo(data []byte) (ConvInfo, error) {
+	var c ConvInfo
+	if len(data) < IDSize+1+2 {
+		return c, fmt.Errorf("conv info too short: %d", len(data))
+	}
+
+	offset := 0
+	copy(c.ConvID[:], data[offset:offset+IDSize])
+	offset += IDSize
+
+	c.IsGroup = data[offset] != 0
+	offset++
+
+	var err error
+	if c.Name, offset, err = getString(data, offset); err != nil {
+		return c, fmt.Errorf("conv info name: %w", err)
+	}
+
+	if len(data) < offset+2 {
+		return c, fmt.Errorf("conv info truncated before member count")
+	}
+	count := int(binary.BigEndian.Uint16(data[offset:]))
+	offset += 2
+
+	// The count is attacker-controlled, so refuse one the remaining body could
+	// not possibly hold rather than preallocating for it. This bounds the
+	// allocation only: it assumes every member costs the minimum, so a member
+	// with a long name leaves less behind than the check assumed and each
+	// iteration still has to bounds-check for itself.
+	if max := (len(data) - offset) / memberMinSize; count > max {
+		return c, fmt.Errorf("conv info claims %d members, body holds at most %d", count, max)
+	}
+
+	c.Members = make([]ConvMember, 0, count)
+	for i := 0; i < count; i++ {
+		if len(data) < offset+IDSize+32 {
+			return c, fmt.Errorf("conv info truncated at member %d", i)
+		}
+		var m ConvMember
+		copy(m.UserID[:], data[offset:offset+IDSize])
+		offset += IDSize
+		copy(m.PubKey[:], data[offset:offset+32])
+		offset += 32
+
+		if m.Name, offset, err = getString(data, offset); err != nil {
+			return c, fmt.Errorf("conv info member %d: %w", i, err)
+		}
+		c.Members = append(c.Members, m)
+	}
+	return c, nil
 }
 
 // EncodeSignedURLPayload / DecodeSignedURLPayload carry one or two length-prefixed

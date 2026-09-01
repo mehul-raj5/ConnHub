@@ -1,6 +1,7 @@
 package common
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -93,15 +94,20 @@ func Sha256(data []byte) [32]byte {
 	return sha256.Sum256(data)
 }
 
+// LowerID reports whether id1 sorts before id2 in lexicographic byte order.
+// Equal IDs report false.
+//
+// Both ends of a direct conversation evaluate this identically, which is what
+// lets them agree on which half of the derived root each takes for sending and
+// which for receiving, without exchanging a message to settle it.
+func LowerID(id1, id2 [16]byte) bool {
+	return bytes.Compare(id1[:], id2[:]) < 0
+}
+
 func HashIDs(id1, id2 [16]byte) [16]byte {
 	first, second := id1, id2
-	for i := 0; i < 16; i++ {
-		if id1[i] < id2[i] {
-			break
-		} else if id1[i] > id2[i] {
-			first, second = id2, id1
-			break
-		}
+	if !LowerID(id1, id2) {
+		first, second = id2, id1
 	}
 
 	h := sha256.New()

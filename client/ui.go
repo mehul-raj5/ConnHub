@@ -396,19 +396,9 @@ func sendTextBubbleTea(convID [16]byte, text string) {
 	}
 
 	if mgr.IsGroup(convID) {
-		rotationMu.Lock()
-		err := sessionMgr.EncryptGroupPacket(&pkt)
-		rotationMu.Unlock()
-
-		if err != nil {
+		if err := sessionMgr.EncryptGroupPacket(&pkt); err != nil {
 			go program.Send(NetworkMsg{IsSystemMeta: true, Content: fmt.Sprintf("Group Encryption failed: %v", err)})
 			return
-		}
-		if sess, ok := sessionMgr.GetGroupSession(convID); ok {
-			sess.IncrementCounter()
-			if sess.ShouldRotate() && mgr.IsGroupAdmin(convID) {
-				go rotateGroupKey(convID)
-			}
 		}
 	} else {
 		if err := sessionMgr.EncryptPacket(&pkt); err != nil {
