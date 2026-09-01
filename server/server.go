@@ -228,13 +228,15 @@ func (s *Server) handlePacket(sender *Client, p common.Packet) {
 		s.handleGroupRemoveAdmin(sender, p)
 	case common.CtrlDirectInit:
 		s.handleDirectInit(sender, p)
-	case common.CtrlPubRq:
-		s.handlePubRq(sender, p)
+	case common.CtrlConvInfoRq:
+		s.handleConvInfoRq(sender, p)
 	case common.CtrlUploadRq:
 		s.handleUploadRq(sender, p)
 	case common.CtrlDownloadRq:
 		s.handleDownloadRq(sender, p)
-	case common.MsgText, common.MsgMediaMeta, common.MsgControl, common.CtrlGroupKeyUpdate, common.CtrlGroupKeyUpdateAck:
+	// CtrlSenderKey is a unicast relay: one member's chain key, encrypted to a
+	// single peer over the 1-1 conversation they share, so it routes like data.
+	case common.MsgText, common.MsgMediaMeta, common.CtrlSenderKey:
 		s.handleData(sender, p)
 	default:
 		log.Printf("Unknown MsgType: %d", p.Header.MsgType)
@@ -292,6 +294,7 @@ func (s *Server) handleGroupAdd(sender *Client, p common.Packet) {
 		return
 	}
 	conv.Members = append(conv.Members, targetID)
+	s.ensurePairwiseConvsLocked(conv.Members)
 	s.mu.Unlock()
 
 	respBody := make([]byte, 0)
@@ -299,6 +302,7 @@ func (s *Server) handleGroupAdd(sender *Client, p common.Packet) {
 	respBody = append(respBody, byte(len(conv.Name)))
 	respBody = append(respBody, []byte(conv.Name)...)
 	respBody = append(respBody, targetID[:]...)
+	respBody = append(respBody, targetUser.IdentityKey[:]...)
 	respBody = append(respBody, byte(len(targetName)))
 	respBody = append(respBody, []byte(targetName)...)
 
@@ -318,17 +322,7 @@ func (s *Server) handleGroupAdd(sender *Client, p common.Packet) {
 	syncBody = append(syncBody, []byte(conv.Name)...)
 
 	s.mu.RLock()
-	syncBody = append(syncBody, byte(len(conv.Members)))
-	for _, mID := range conv.Members {
-		user := s.users[mID]
-		name := "Unknown"
-		if user != nil {
-			name = user.Username
-		}
-		syncBody = append(syncBody, mID[:]...)
-		syncBody = append(syncBody, byte(len(name)))
-		syncBody = append(syncBody, []byte(name)...)
-	}
+	syncBody = s.appendRosterLocked(syncBody, conv.Members)
 	var adminsList [][16]byte
 	for aID := range conv.Admins {
 		if aID != sender.UserID {
@@ -687,25 +681,16 @@ func (s *Server) handleGroupCreate(sender *Client, p common.Packet) {
 
 	s.mu.Lock()
 	s.convs[convID] = conv
+	s.ensurePairwiseConvsLocked(conv.Members)
 	s.mu.Unlock()
 
 	respBody := make([]byte, 0)
 	respBody = append(respBody, convID[:]...)
 	respBody = append(respBody, byte(len(groupName)))
 	respBody = append(respBody, []byte(groupName)...)
-	respBody = append(respBody, byte(len(conv.Members)))
 
 	s.mu.RLock()
-	for _, mID := range conv.Members {
-		user := s.users[mID]
-		name := "Unknown"
-		if user != nil {
-			name = user.Username
-		}
-		respBody = append(respBody, mID[:]...)
-		respBody = append(respBody, byte(len(name)))
-		respBody = append(respBody, []byte(name)...)
-	}
+	respBody = s.appendRosterLocked(respBody, conv.Members)
 	s.mu.RUnlock()
 
 	resp := common.Packet{
@@ -720,6 +705,55 @@ func (s *Server) handleGroupCreate(sender *Client, p common.Packet) {
 
 	for _, mID := range conv.Members {
 		s.sendPacket(mID, resp)
+	}
+}
+
+// appendRosterLocked writes a member list in the group-broadcast format:
+// count(1), then per member id(16) ‖ identityKey(32) ‖ nameLen(1) ‖ name.
+//
+// The identity keys ride along so that a client receiving the broadcast can
+// derive a direct session with every other member on the spot, rather than
+// paying a lookup round trip per peer before it can hand out its sender key.
+//
+// Caller must hold at least s.mu.RLock.
+func (s *Server) appendRosterLocked(buf []byte, members [][common.IDSize]byte) []byte {
+	buf = append(buf, byte(len(members)))
+	for _, mID := range members {
+		name := "Unknown"
+		var key [32]byte
+		if u, ok := s.users[mID]; ok {
+			name = u.Username
+			key = u.IdentityKey
+		}
+		buf = append(buf, mID[:]...)
+		buf = append(buf, key[:]...)
+		buf = append(buf, byte(len(name)))
+		buf = append(buf, []byte(name)...)
+	}
+	return buf
+}
+
+// ensurePairwiseConvsLocked registers the 1-1 conversation between every pair of
+// members. Group sender keys travel over those direct channels, and handleData
+// relays only for conversations the server knows about, so without this every
+// pair of members would have to exchange a CtrlDirectInit before the group
+// could be keyed at all.
+//
+// Caller must hold s.mu.Lock.
+func (s *Server) ensurePairwiseConvsLocked(members [][common.IDSize]byte) {
+	for i := 0; i < len(members); i++ {
+		for j := i + 1; j < len(members); j++ {
+			convID := common.HashIDs(members[i], members[j])
+			if _, exists := s.convs[convID]; exists {
+				continue
+			}
+			s.convs[convID] = &Conversation{
+				ID:      convID,
+				Members: [][common.IDSize]byte{members[i], members[j]},
+				Admins:  make(map[[common.IDSize]byte]struct{}),
+				IsGroup: false,
+			}
+		}
 	}
 }
 
@@ -761,15 +795,20 @@ func (s *Server) handleDirectInit(sender *Client, p common.Packet) {
 		targetPubKey = u.IdentityKey
 	}
 
-	var senderPubKey [32]byte
-	if u, ok := s.users[sender.UserID]; ok {
-		senderPubKey = u.IdentityKey
-	}
 	s.mu.Unlock()
 
-	ackBody := make([]byte, 0, 16+32)
+	// The target is deliberately not notified. They learn of the conversation
+	// when the first message arrives and ask for the roster themselves, which
+	// is what lets the initiator start sending while the target is offline.
+	//
+	// The target's user ID has to be here: the initiator needs it to decide
+	// which half of the derived root it sends on, and it cannot be recovered
+	// from the conversation ID, which is a hash.
+	ackBody := make([]byte, 0, 16+16+32+len(targetName))
 	ackBody = append(ackBody, convID[:]...)
+	ackBody = append(ackBody, targetID[:]...)
 	ackBody = append(ackBody, targetPubKey[:]...)
+	ackBody = append(ackBody, []byte(targetName)...)
 
 	ack := common.Packet{
 		Header: common.Header{
@@ -780,53 +819,58 @@ func (s *Server) handleDirectInit(sender *Client, p common.Packet) {
 		Body: ackBody,
 	}
 	s.sendPacket(sender.UserID, ack)
-
-	notifyBody := make([]byte, 0, 16+32+len(sender.Username))
-	notifyBody = append(notifyBody, convID[:]...)
-	notifyBody = append(notifyBody, senderPubKey[:]...)
-	notifyBody = append(notifyBody, []byte(sender.Username)...)
-
-	notify := common.Packet{
-		Header: common.Header{
-			MsgType:        common.CtrlDirectInit,
-			ConversationID: convID,
-			BodyLen:        uint32(len(notifyBody)),
-			SenderID:       sender.UserID,
-		},
-		Body: notifyBody,
-	}
-	s.sendPacket(targetID, notify)
 }
 
-func (s *Server) handlePubRq(sender *Client, p common.Packet) {
-	if len(p.Body) < 16 {
+// handleConvInfoRq answers a member's request for the roster of a conversation
+// they belong to: whether it is a group, and every member's identity key and
+// name. This is the only route by which a client obtains another user's public
+// key, so the membership check is what stops it being an open directory of
+// every key the server holds.
+//
+// A request from a non-member, or for a conversation that does not exist, is
+// dropped without a reply. Answering differently would tell a prober which
+// conversation IDs are real.
+func (s *Server) handleConvInfoRq(sender *Client, p common.Packet) {
+	if len(p.Body) < common.IDSize {
 		return
 	}
-	var targetID [16]byte
-	copy(targetID[:], p.Body[:16])
+	var convID [common.IDSize]byte
+	copy(convID[:], p.Body[:common.IDSize])
 
 	s.mu.RLock()
-	user, exists := s.users[targetID]
-	s.mu.RUnlock()
-
-	if !exists {
+	conv, ok := s.convs[convID]
+	if !ok || !conv.HasMember(sender.UserID) {
+		s.mu.RUnlock()
+		log.Printf("[WARNING] CtrlConvInfoRq from %x for conv %x they are not a member of",
+			sender.UserID[:4], convID[:4])
 		return
 	}
 
-	respBody := make([]byte, 16+32)
-	copy(respBody[0:16], targetID[:])
-	copy(respBody[16:48], user.IdentityKey[:])
-
-	resp := common.Packet{
-		Header: common.Header{
-			MsgType:        common.CtrlPubAck,
-			ConversationID: p.Header.ConversationID,
-			SenderID:       [16]byte{},
-			BodyLen:        uint32(len(respBody)),
-		},
-		Body: respBody,
+	info := common.ConvInfo{
+		ConvID:  convID,
+		IsGroup: conv.IsGroup,
+		Name:    conv.Name,
+		Members: make([]common.ConvMember, 0, len(conv.Members)),
 	}
-	s.sendPacket(sender.UserID, resp)
+	for _, mID := range conv.Members {
+		m := common.ConvMember{UserID: mID}
+		if u, ok := s.users[mID]; ok {
+			m.PubKey = u.IdentityKey
+			m.Name = u.Username
+		}
+		info.Members = append(info.Members, m)
+	}
+	s.mu.RUnlock()
+
+	body := info.Encode()
+	s.sendPacket(sender.UserID, common.Packet{
+		Header: common.Header{
+			MsgType:        common.CtrlConvInfoAck,
+			ConversationID: convID,
+			BodyLen:        uint32(len(body)),
+		},
+		Body: body,
+	})
 }
 
 // isMember reports whether userID belongs to the conversation convID.
@@ -1126,7 +1170,11 @@ func main() {
 		log.Printf("Media storage DISABLED: set SUPABASE_URL, SUPABASE_SERVICE_KEY, SUPABASE_BUCKET to enable")
 	}
 
-	if err := srv.Start(":8080"); err != nil {
+	addr := os.Getenv("LISTEN_ADDR")
+	if addr == "" {
+		addr = ":8080"
+	}
+	if err := srv.Start(addr); err != nil {
 		log.Fatal(err)
 	}
 }

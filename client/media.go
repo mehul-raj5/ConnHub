@@ -153,18 +153,9 @@ func sendMedia(convID [16]byte, path string) {
 	}
 
 	if mgr.IsGroup(convID) {
-		rotationMu.Lock()
-		encErr := sessionMgr.EncryptGroupPacket(&pkt)
-		rotationMu.Unlock()
-		if encErr != nil {
+		if encErr := sessionMgr.EncryptGroupPacket(&pkt); encErr != nil {
 			tuiPrintf("[ERROR] Group encryption failed for media: %v", encErr)
 			return
-		}
-		if sess, ok := sessionMgr.GetGroupSession(convID); ok {
-			sess.IncrementCounter()
-			if sess.ShouldRotate() && mgr.IsGroupAdmin(convID) {
-				go rotateGroupKey(convID)
-			}
 		}
 	} else {
 		if encErr := sessionMgr.EncryptPacket(&pkt); encErr != nil {

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"sync"
-	"time"
 )
 
 type ClientManager struct {
@@ -16,8 +15,7 @@ type ClientManager struct {
 
 	Usernames map[[common.IDSize]byte]string
 
-	PublicKeys      map[[common.IDSize]byte][32]byte
-	pendingRequests map[[common.IDSize]byte]chan struct{}
+	PublicKeys map[[common.IDSize]byte][32]byte
 
 	// pendingURLs correlates a CtrlUpload/DownloadRq (keyed by the request's
 	// MessageID) with the CtrlUpload/DownloadAck the server replies with.
@@ -36,13 +34,12 @@ type ConversationInfo struct {
 func NewClientManager(userID [common.IDSize]byte, username string) *ClientManager {
 	log.Printf("[DEBUG] NewClientManager called with UserID: %x\n", userID)
 	return &ClientManager{
-		UserID:          userID,
-		Username:        username,
-		Conversations:   make(map[[common.IDSize]byte]ConversationInfo),
-		Usernames:       make(map[[common.IDSize]byte]string),
-		PublicKeys:      make(map[[common.IDSize]byte][32]byte),
-		pendingRequests: make(map[[common.IDSize]byte]chan struct{}),
-		pendingURLs:     make(map[[common.IDSize]byte]chan []string),
+		UserID:        userID,
+		Username:      username,
+		Conversations: make(map[[common.IDSize]byte]ConversationInfo),
+		Usernames:     make(map[[common.IDSize]byte]string),
+		PublicKeys:    make(map[[common.IDSize]byte][32]byte),
+		pendingURLs:   make(map[[common.IDSize]byte]chan []string),
 	}
 }
 
@@ -202,47 +199,8 @@ func (m *ClientManager) RemoveConversation(id [common.IDSize]byte) {
 	delete(m.Conversations, id)
 }
 
-func (m *ClientManager) GetPublicKey(userID [common.IDSize]byte, fetchFunc func()) ([32]byte, error) {
-	m.mu.Lock()
-	if key, ok := m.PublicKeys[userID]; ok {
-		m.mu.Unlock()
-		return key, nil
-	}
-
-	ch, pending := m.pendingRequests[userID]
-	if !pending {
-		ch = make(chan struct{})
-		m.pendingRequests[userID] = ch
-		m.mu.Unlock()
-		fetchFunc()
-		m.mu.Lock()
-	}
-
-	m.mu.Unlock()
-
-	select {
-	case <-ch:
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		if key, ok := m.PublicKeys[userID]; ok {
-			return key, nil
-		}
-		return [32]byte{}, fmt.Errorf("public key not found after fetch")
-	case <-time.After(5 * time.Second):
-		m.mu.Lock()
-		delete(m.pendingRequests, userID)
-		m.mu.Unlock()
-		return [32]byte{}, fmt.Errorf("timeout waiting for public key")
-	}
-}
-
 func (m *ClientManager) UpdatePublicKey(userID [common.IDSize]byte, key [32]byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.PublicKeys[userID] = key
-
-	if ch, ok := m.pendingRequests[userID]; ok {
-		close(ch)
-		delete(m.pendingRequests, userID)
-	}
 }
